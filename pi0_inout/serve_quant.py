@@ -75,8 +75,9 @@ import torch.nn as nn
 
 # ── pi0_inout imports (quantization layer) ────────────────────────────────────
 from pi0_inout.quant_types import QuantFormat
-from pi0_inout.model_patcher import patch_model, list_linear_layers
+from pi0_inout.model_patcher import patch_model, patch_model_matvec, list_linear_layers
 from pi0_inout.stats_tracker import StatsTracker
+from pi0_inout.ulp_noise import UlpNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -313,10 +314,21 @@ class Pi0PyTorchPolicy:
             state=state,
             tokenized_prompt=tokenized_prompt,
             tokenized_prompt_mask=tokenized_prompt_mask,
+            # openpi preprocessing expects these attributes to exist 
+            token_ar_mask=None,
+            token_loss_mask=None,
         )
 
+        # Deterministic noise
+        noise = None
+        if "pi0_noise" in obs and obs["pi0_noise"] is not None:
+            n = np.asarray(obs["pi0_noise"], dtype=np.float32)
+            if n.ndim == 2:
+                n = n[None, ...]
+            noise = torch.from_numpy(n.copy()).to(dev)
+
         with torch.no_grad():
-            actions = self.model.sample_actions(str(dev), obs_ns, num_steps=10)
+            actions = self.model.sample_actions(str(dev), obs_ns, noise=noise, num_steps=10)
         # actions: [1, action_horizon=15, action_dim=32]
         return {"actions": actions.squeeze(0).cpu().numpy()}
 
@@ -365,15 +377,44 @@ def main() -> None:
     input_fmt  = QuantFormat(args.input_fmt)
     output_fmt = QuantFormat(args.output_fmt)
 
+    # ULP noise injection into Linear matmul outputs
+    ulp_noise = None
+    if args.ulp_n and args.ulp_n > 0:
+        ulp_noise = UlpNoiseConfig(
+            n_ulp=args.ulp_n,
+            ulp_fmt=QuantFormat(args.ulp_fmt),
+        )
+
     tracker = StatsTracker()
-    patch_model(
-        model=model,
-        input_fmt=input_fmt,
-        output_fmt=output_fmt,
-        tracker=tracker,
-        verbose=False,
-    )
-    logger.info(f"Model patched: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}")
+    if args.use_matvec:
+        # Matrix/vector mode: enforce vec_in == mat_out internally.
+        patch_model_matvec(
+            model=model,
+            matrix_in_fmt=QuantFormat(args.mat_in_fmt),
+            matrix_out_fmt=QuantFormat(args.mat_out_fmt),
+            vector_out_fmt=QuantFormat(args.vec_out_fmt),
+            tracker=tracker,
+            ulp_noise=ulp_noise,
+            verbose=False,
+        )
+        logger.info(
+            "Model patched (matvec): "
+            f"mat_in={args.mat_in_fmt} mat_out={args.mat_out_fmt} vec_out={args.vec_out_fmt} "
+            f"ulp_n={args.ulp_n} ulp_fmt={args.ulp_fmt}"
+        )
+    else:
+        patch_model(
+            model=model,
+            input_fmt=input_fmt,
+            output_fmt=output_fmt,
+            tracker=tracker,
+            ulp_noise=ulp_noise,
+            verbose=False,
+        )
+        logger.info(
+            f"Model patched: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}  "
+            f"ulp_n={args.ulp_n} ulp_fmt={args.ulp_fmt}"
+        )
 
     # ── Register stats dump on exit ───────────────────────────────────────
     def _dump_stats() -> None:
@@ -392,6 +433,20 @@ def main() -> None:
 
     # ── Build policy and start WebSocket server ───────────────────────────
     policy = Pi0PyTorchPolicy(model=model, device=device)
+    policy.metadata = {
+        "model": "PI0Pytorch",
+        "quantized": True,
+        "quant": {
+            "input_fmt": input_fmt.value,
+            "output_fmt": output_fmt.value,
+            "use_matvec": bool(args.use_matvec),
+            "mat_in_fmt": getattr(args, "mat_in_fmt", None),
+            "mat_out_fmt": getattr(args, "mat_out_fmt", None),
+            "vec_out_fmt": getattr(args, "vec_out_fmt", None),
+            "ulp_n": int(getattr(args, "ulp_n", 0) or 0),
+            "ulp_fmt": getattr(args, "ulp_fmt", None),
+        },
+    }
 
     from openpi.serving import websocket_policy_server
     import socket
@@ -430,6 +485,26 @@ def parse_args() -> argparse.Namespace:
                    choices=[f.value for f in QuantFormat])
     p.add_argument("--output-fmt", default="float32",
                    choices=[f.value for f in QuantFormat])
+
+    # Optional: matrix/vector separate formats (constraint: vec_in == mat_out)
+    p.add_argument("--use-matvec", action="store_true",
+                   help="Use matrix/vector IO formats for nn.Linear instead of simple input/output formats")
+    p.add_argument("--mat-in-fmt", default="float32",
+                   choices=[f.value for f in QuantFormat],
+                   help="Matrix input format (activation+weight)")
+    p.add_argument("--mat-out-fmt", default="float32",
+                   choices=[f.value for f in QuantFormat],
+                   help="Matrix output format (matmul output before bias add)")
+    p.add_argument("--vec-out-fmt", default="float32",
+                   choices=[f.value for f in QuantFormat],
+                   help="Vector output format (final output after bias add)")
+
+    # Optional: ULP noise injection into matmul outputs
+    p.add_argument("--ulp-n", type=int, default=0,
+                   help="Inject +/- n ULP noise into each Linear matmul output (0 disables)")
+    p.add_argument("--ulp-fmt", default="bfloat16",
+                   choices=[f.value for f in QuantFormat],
+                   help="Format whose ULP grid defines the step size")
 
     # Output
     p.add_argument("--stats-output", default=None,
