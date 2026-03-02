@@ -66,13 +66,24 @@ FORMAT_BITS: dict[QuantFormat, dict] = {
 # Core quantization function
 # ---------------------------------------------------------------------------
 
+_FP8_FORMATS = {QuantFormat.FLOAT8_E4M3, QuantFormat.FLOAT8_E5M2}
+
+# Max representable finite value for each FP8 format
+_FP8_MAX: dict[QuantFormat, float] = {
+    QuantFormat.FLOAT8_E4M3: 448.0,
+    QuantFormat.FLOAT8_E5M2: 57344.0,
+}
+
+
 def quant(x: torch.Tensor, fmt: QuantFormat) -> torch.Tensor:
     """
     Quantize tensor `x` to format `fmt` and return in the original dtype.
 
     For FLOAT32: returns x unchanged (identity — no rounding).
-    For all others: casts through float32 → target → original_dtype,
-                    snapping each value to the target format's grid.
+    For FP8 formats: applies per-tensor absmax scaling to fit the dynamic
+        range into the representable range, then casts and scales back.
+        This prevents overflow → NaN while preserving relative precision.
+    For FP16/BF16: raw cast (range is sufficient for typical values).
 
     Args:
         x:   Input tensor in any floating-point dtype.
@@ -82,9 +93,38 @@ def quant(x: torch.Tensor, fmt: QuantFormat) -> torch.Tensor:
         Tensor of same shape and dtype as `x`.
     """
     target = TORCH_DTYPE[fmt]
+
+    if fmt in _FP8_FORMATS:
+        return _quant_fp8_scaled(x, fmt)
+
     # x.float() → target_dtype (RNE rounding) → original_dtype
     # For FLOAT32, this is float32 → float32 → original = x  (identity)
     return x.float().to(target).to(x.dtype)
+
+
+def _quant_fp8_scaled(x: torch.Tensor, fmt: QuantFormat) -> torch.Tensor:
+    """
+    Per-tensor absmax scaling for FP8 quantization.
+
+    scale = max(|x|) / fp8_max
+    x_scaled = x / scale          → fits within [-fp8_max, fp8_max]
+    x_q = cast(x_scaled, fp8)     → round to FP8 grid
+    return x_q * scale            → restore original magnitude
+    """
+    target = TORCH_DTYPE[fmt]
+    fp8_max = _FP8_MAX[fmt]
+
+    x_f32 = x.float()
+    amax = x_f32.abs().max()
+
+    # If all zeros, nothing to scale
+    if amax == 0:
+        return x_f32.to(x.dtype)
+
+    scale = amax / fp8_max
+    x_scaled = x_f32 / scale
+    x_q = x_scaled.to(target).to(torch.float32)
+    return (x_q * scale).to(x.dtype)
 
 
 def all_formats() -> list[QuantFormat]:
