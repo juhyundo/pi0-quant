@@ -502,11 +502,9 @@ class Pi0PyTorchPolicy:
         else:
             norm_state = raw_state
 
-        # Keep the normalized state (padded to 32) for AbsoluteActions later
-        norm_state_padded = np.zeros(32, dtype=np.float32)
-        norm_state_padded[:norm_state.shape[0]] = norm_state
-
-        state = torch.from_numpy(norm_state_padded).unsqueeze(0).to(dev)  # (1, 32)
+        state_padded = np.zeros(32, dtype=np.float32)
+        state_padded[:norm_state.shape[0]] = norm_state
+        state = torch.from_numpy(state_padded).unsqueeze(0).to(dev)  # (1, 32)
 
         # ── Tokenised prompt: zeros (mask=0 → model ignores language) ────
         max_tok = 200
@@ -530,16 +528,16 @@ class Pi0PyTorchPolicy:
         # actions: [1, action_horizon, 32]  (normalized action space)
         actions = actions.squeeze(0).cpu().numpy()  # (horizon, 32)
 
-        # ── Output transforms (mirrors openpi pipeline order) ─────────────
-        # 1. AbsoluteActions: add NORMALIZED state to normalized delta actions
-        #    (must happen before unnormalize — same order as official openpi)
-        #    mask = make_bool_mask(7, -1) = first 7 dims True, last dim (gripper) False
-        if self.is_joint_position:
-            actions[..., :7] += norm_state_padded[:7]
-
-        # 2. Unnormalize actions (from normalized absolute → physical absolute)
+        # ── Output transforms (mirrors openpi pipeline) ───────────────────
+        # 1. Unnormalize actions (normalized delta → physical delta)
         if self.norm_stats and "actions" in self.norm_stats:
             actions = self._unnormalize(actions, self.norm_stats["actions"])
+
+        # 2. AbsoluteActions for joint-position configs:
+        #    model outputs delta joint positions → add current state to get absolute
+        #    mask = make_bool_mask(7, -1) = first 7 dims True, last dim (gripper) False
+        if self.is_joint_position:
+            actions[..., :7] += raw_state[:7]
 
         # 3. Slice to 8 dims (7 joints + 1 gripper)
         return {"actions": actions[:, :8]}
