@@ -4,11 +4,21 @@ version = "0.1.0"
 description = "Matmul input/output quantization sweep for Pi0Pytorch"
 requires-python = ">=3.10"
 dependencies = [
+    "dm-tree>=0.1.8",
+    "msgpack>=1.1.2",
+    "numpy>=1.22.4,<2.0.0",
+    "pillow>=12.1.1",
+    "pytest>=9.0.2",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.1.99",
     "torch>=2.1",
+    "transformers==4.53.2",
+    "tree>=0.2.4",
+    "websockets>=16.0",
 ]
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
