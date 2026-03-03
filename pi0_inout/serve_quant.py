@@ -633,10 +633,12 @@ def main() -> None:
     # ULP noise injection into Linear matmul outputs
     ulp_noise = None
     if args.ulp_n and args.ulp_n > 0:
+        ulp_fmt_val = args.ulp_fmt if args.ulp_fmt is not None else args.output_fmt
         ulp_noise = UlpNoiseConfig(
             n_ulp=args.ulp_n,
-            ulp_fmt=QuantFormat(args.ulp_fmt),
+            ulp_fmt=QuantFormat(ulp_fmt_val),
         )
+        logger.info(f"ULP noise: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}  ulp_n={args.ulp_n}  ulp_fmt={ulp_fmt_val}")
 
     tracker = StatsTracker()
     patch_model(
@@ -644,6 +646,7 @@ def main() -> None:
         input_fmt=input_fmt,
         output_fmt=output_fmt,
         tracker=tracker,
+        ulp_noise=ulp_noise,
         verbose=False,
     )
     logger.info(f"Model patched: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}")
@@ -761,9 +764,9 @@ def parse_args() -> argparse.Namespace:
     # Optional: ULP noise injection into matmul outputs
     p.add_argument("--ulp-n", type=int, default=0,
                    help="Inject +/- n ULP noise into each Linear matmul output (0 disables)")
-    p.add_argument("--ulp-fmt", default="bfloat16",
+    p.add_argument("--ulp-fmt", default=None,
                    choices=[f.value for f in QuantFormat],
-                   help="Format whose ULP grid defines the step size")
+                   help="Format whose ULP grid defines the step size (default: same as --output-fmt)")
 
     # Output
     p.add_argument("--stats-output", default=None,
