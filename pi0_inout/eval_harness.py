@@ -68,8 +68,8 @@ class QuantConfig:
     skip_components: Components to leave at full precision (useful for ablations).
     label:       Human-readable name for this configuration.
     """
-    input_fmt:  QuantFormat = QuantFormat.FLOAT32
-    output_fmt: QuantFormat = QuantFormat.FLOAT32
+    input_fmt:  QuantFormat = QuantFormat.BFLOAT16
+    output_fmt: QuantFormat = QuantFormat.BFLOAT16
     ulp_noise: Optional[UlpNoiseConfig] = None
     skip_components: frozenset[Component] = field(default_factory=frozenset)
     label: str = ""
@@ -87,9 +87,9 @@ class MatVecQuantConfig:
     Constraint:
         vector_in_fmt == matrix_out_fmt (enforced by patch_model_matvec).
     """
-    matrix_in_fmt: QuantFormat = QuantFormat.FLOAT32
-    matrix_out_fmt: QuantFormat = QuantFormat.FLOAT32
-    vector_out_fmt: QuantFormat = QuantFormat.FLOAT32
+    matrix_in_fmt: QuantFormat = QuantFormat.BFLOAT16
+    matrix_out_fmt: QuantFormat = QuantFormat.BFLOAT16
+    vector_out_fmt: QuantFormat = QuantFormat.BFLOAT16
     ulp_noise: Optional[UlpNoiseConfig] = None
     skip_components: frozenset[Component] = field(default_factory=frozenset)
     label: str = ""
@@ -369,10 +369,10 @@ def default_sweep_configs(
     """
     Build the full 5x5 grid of (input_fmt × output_fmt) QuantConfigs.
 
-    Default: 25 combinations of
-        {FLOAT32, FP16, BF16, FP8-E4M3, FP8-E5M2} × same.
+    Default: 16 combinations of
+        {BF16, FP16, FP8-E4M3, FP8-E5M2} × same.
 
-    FLOAT32 × FLOAT32 is the identity baseline (expected RMSE = 0).
+    BFLOAT16 × BFLOAT16 is the identity baseline (expected RMSE = 0).
 
     Args:
         input_formats:  Override the default input format list.
@@ -383,17 +383,15 @@ def default_sweep_configs(
     """
     if input_formats is None:
         input_formats = [
-            QuantFormat.FLOAT32,      # baseline — zero RMSE, use to verify correctness
+            QuantFormat.BFLOAT16,      # baseline — zero RMSE, use to verify correctness
             QuantFormat.FLOAT16,
-            QuantFormat.BFLOAT16,
             QuantFormat.FLOAT8_E4M3,
             QuantFormat.FLOAT8_E5M2,
         ]
     if output_formats is None:
         output_formats = [
-            QuantFormat.FLOAT32,
-            QuantFormat.FLOAT16,
             QuantFormat.BFLOAT16,
+            QuantFormat.FLOAT16,
             QuantFormat.FLOAT8_E4M3,
             QuantFormat.FLOAT8_E5M2,
         ]

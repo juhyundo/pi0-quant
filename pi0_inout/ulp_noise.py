@@ -39,7 +39,6 @@ class UlpNoiseConfig:
 # Minimum normal exponent (emin) and fraction bits (explicit mantissa bits) for each format.
 # These are used for ULP spacing computations.
 _FMT_PARAMS: dict[QuantFormat, dict[str, int]] = {
-    QuantFormat.FLOAT32:     {"emin": -126, "frac_bits": 23},
     QuantFormat.FLOAT16:     {"emin": -14,  "frac_bits": 10},
     QuantFormat.BFLOAT16:    {"emin": -126, "frac_bits": 7},
     # fp8 formats (IEEE-like). torch.float8_e4m3fn has finite-only range; ULP spacing rule still follows e/f.

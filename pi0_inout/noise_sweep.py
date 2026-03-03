@@ -22,10 +22,10 @@ from .ulp_noise import UlpNoiseConfig
 
 
 DEFAULT_FORMATS_4 = [
-    QuantFormat.FLOAT32,
-    QuantFormat.FLOAT16,
     QuantFormat.BFLOAT16,
+    QuantFormat.FLOAT16,
     QuantFormat.FLOAT8_E4M3,
+    QuantFormat.FLOAT8_E5M2,
 ]
 
 

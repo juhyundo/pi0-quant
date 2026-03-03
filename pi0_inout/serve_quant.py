@@ -386,10 +386,10 @@ def print_quant_diagnostics(
               f"({100 * n_changed / n_total:.1f}%)")
         print(f"    Max abs difference:  {diff.max().item():.6e}")
         print(f"    Mean abs difference: {diff.mean().item():.6e}")
-        if n_changed == 0 and input_fmt != QuantFormat.FLOAT32:
+        if n_changed == 0 and input_fmt != QuantFormat.BFLOAT16:
             print(f"    WARNING: No values changed! Quantization may not be working.")
-        elif input_fmt == QuantFormat.FLOAT32:
-            print(f"    OK: FLOAT32 passthrough — zero difference expected.")
+        elif input_fmt == QuantFormat.BFLOAT16:
+            print(f"    OK: BFLOAT16 passthrough — zero difference expected for bf16 models.")
         else:
             print(f"    OK: Quantization is actively rounding values.")
 
@@ -748,13 +748,13 @@ def parse_args() -> argparse.Namespace:
     # Optional: matrix/vector separate formats (constraint: vec_in == mat_out)
     p.add_argument("--use-matvec", action="store_true",
                    help="Use matrix/vector IO formats for nn.Linear instead of simple input/output formats")
-    p.add_argument("--mat-in-fmt", default="float32",
+    p.add_argument("--mat-in-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat],
                    help="Matrix input format (activation+weight)")
-    p.add_argument("--mat-out-fmt", default="float32",
+    p.add_argument("--mat-out-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat],
                    help="Matrix output format (matmul output before bias add)")
-    p.add_argument("--vec-out-fmt", default="float32",
+    p.add_argument("--vec-out-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat],
                    help="Vector output format (final output after bias add)")
 
