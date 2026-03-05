@@ -26,7 +26,7 @@ For each nn.Linear:
     y    = F.linear(x_q, W_q, b_q)        # float32 accumulation
     out  = quant(y, output_fmt)            # single output quantization
 
-FLOAT32/FLOAT32 is the identity — zero RMSE baseline.
+BFLOAT16/BFLOAT16 is the identity — zero RMSE baseline.
 
 Usage
 -----
@@ -75,7 +75,7 @@ import torch
 import torch.nn as nn
 
 # ── pi0_inout imports (quantization layer) ────────────────────────────────────
-from pi0_inout.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS
+from pi0_inout.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS, set_fp8_mode
 from pi0_inout.model_patcher import (
     patch_model, list_linear_layers,
     QuantGroup, ALL_GROUPS,
@@ -389,10 +389,10 @@ def print_quant_diagnostics(
               f"({100 * n_changed / n_total:.1f}%)")
         print(f"    Max abs difference:  {diff.max().item():.6e}")
         print(f"    Mean abs difference: {diff.mean().item():.6e}")
-        if n_changed == 0 and input_fmt != QuantFormat.FLOAT32:
+        if n_changed == 0 and input_fmt != QuantFormat.BFLOAT16:
             print(f"    WARNING: No values changed! Quantization may not be working.")
-        elif input_fmt == QuantFormat.FLOAT32:
-            print(f"    OK: FLOAT32 passthrough — zero difference expected.")
+        elif input_fmt == QuantFormat.BFLOAT16:
+            print(f"    OK: BFLOAT16 baseline — zero difference expected (no-op).")
         else:
             print(f"    OK: Quantization is actively rounding values.")
 
@@ -629,7 +629,10 @@ def main() -> None:
         print(f"\nTotal linear layers: {len(rows)}")
         return
 
-    # ── Parse formats and patch model ────────────────────────────────────
+    # ── Parse formats and set FP8 mode ────────────────────────────────────
+    set_fp8_mode(args.fp8_mode)
+    logger.info(f"FP8 quantization mode: {args.fp8_mode}")
+
     input_fmt  = QuantFormat(args.input_fmt)
     output_fmt = QuantFormat(args.output_fmt)
 
@@ -753,6 +756,12 @@ def parse_args() -> argparse.Namespace:
                    choices=[f.value for f in QuantFormat])
     p.add_argument("--output-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat])
+    p.add_argument("--fp8-mode", default="scaled",
+                   choices=["scaled", "clamped", "mx"],
+                   help="FP8 quantization mode: "
+                        "'scaled' = per-tensor absmax (default), "
+                        "'clamped' = clamp to range + flush subnormals, "
+                        "'mx' = MX-compliant power-of-two block scaling")
     p.add_argument(
         "--quantize-components",
         nargs="+",

@@ -28,7 +28,7 @@ Quick start:
     tracker.summary().print()
 """
 
-from .quant_types   import QuantFormat, quant, TORCH_DTYPE, FORMAT_BITS, all_formats, sweep_pairs
+from .quant_types   import QuantFormat, quant, TORCH_DTYPE, FORMAT_BITS, all_formats, sweep_pairs, set_fp8_mode, get_fp8_mode
 from .quant_linear  import QuantLinear
 from .model_patcher import (
     patch_model, unpatch_model, count_layers, list_linear_layers,
@@ -55,6 +55,8 @@ __all__ = [
     "FORMAT_BITS",
     "all_formats",
     "sweep_pairs",
+    "set_fp8_mode",
+    "get_fp8_mode",
     # Core modules
     "QuantLinear",
     # Patching
