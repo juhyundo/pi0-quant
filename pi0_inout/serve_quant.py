@@ -756,14 +756,12 @@ def parse_args() -> argparse.Namespace:
                    choices=[f.value for f in QuantFormat])
     p.add_argument("--output-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat])
-<<<<<<< HEAD
     p.add_argument("--fp8-mode", default="scaled",
                    choices=["scaled", "clamped", "mx"],
                    help="FP8 quantization mode: "
                         "'scaled' = per-tensor absmax (default), "
                         "'clamped' = clamp to range + flush subnormals, "
                         "'mx' = MX-compliant power-of-two block scaling")
-=======
     p.add_argument(
         "--quantize-components",
         nargs="+",
@@ -779,7 +777,6 @@ def parse_args() -> argparse.Namespace:
             "Example: --quantize-components transformer action_head"
         ),
     )
->>>>>>> dae36ec42a56f9bed5c015090b9982a71be0f353
 
     # Output
     p.add_argument("--stats-output", default=None,
