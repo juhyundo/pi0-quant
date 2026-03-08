@@ -778,6 +778,24 @@ def parse_args() -> argparse.Namespace:
                    choices=[f.value for f in QuantFormat])
     p.add_argument("--output-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat])
+    p.add_argument("--fp8-mode", default="scaled",
+                   choices=["scaled", "clamped", "mx"],
+                   help="FP8 quantization mode: "
+                        "'scaled' = per-tensor absmax (default), "
+                        "'clamped' = clamp to range + flush subnormals, "
+                        "'mx' = MX-compliant power-of-two block scaling")
+    p.add_argument(
+        "--quantize-components",
+        nargs="+",
+        default=[g.value for g in ALL_GROUPS],
+        choices=[g.value for g in ALL_GROUPS],
+        metavar="COMPONENT",
+        help=(
+            "Which model components to quantize (default: all). "
+            "Choices: vision  transformer  action_head. "
+            "Example: --quantize-components transformer action_head"
+        ),
+    )
 
     # Optional: matrix/vector separate formats (constraint: vec_in == mat_out)
     p.add_argument("--use-matvec", action="store_true",
