@@ -1,30 +1,30 @@
 """
-automate_ulp_sweep.py
+automate_rel_sweep.py
 -----------------------
 Sweep all 16 matrix input/output format combinations ({E4M3, E5M2, FP16, BF16}^2)
-with increasing ULP noise injection, recording end-to-end action RMSE vs. ulp_n.
+with increasing ULP noise injection, recording end-to-end action RMSE vs. rel_err.
 
 For each (input_fmt, output_fmt) pair:
-  - The quantized server runs QuantLinear with those formats and ulp_n noise
+  - The quantized server runs QuantLinear with those formats and rel_err noise
     injected into each matmul output.
   - The base server (BF16, no noise) serves as the reference.
-  - ULP step size is calibrated to output_fmt (--ulp-fmt = output_fmt).
-  - Sweep stops when RMSE >= 0.4 (default) or max_ulp_n is reached.
+  - ULP step size is calibrated to output_fmt (
+  - Sweep stops when RMSE >= 0.4 (default) or max_rel_err is reached.
 
 Usage
 -----
-    python pi0_inout/automate_ulp_sweepp.py \\
+    python pi0_inout/automate_rel_sweepp.py \\
         --checkpoint-dir /path/to/model.safetensors_dir \\
-        --output-dir ./automate_ulp_sweep
+        --output-dir ./automate_rel_sweep
 
     # Quick smoke test (3 steps, 4 observations per combo):
-    python pi0_inout/automate_ulp_sweepp.py \\
+    python pi0_inout/automate_rel_sweepp.py \\
         --checkpoint-dir /path/to/ckpt \\
-        --max-ulp-n 3 --n-obs 4 --output-dir /tmp/test_sweep
+        --max-rel-err 3 --n-obs 4 --output-dir /tmp/test_sweep
 
     # Resume an interrupted run:
-    python pi0_inout/automate_ulp_sweepp.py \\
-        --checkpoint-dir /path/to/ckpt --resume --output-dir ./automate_ulp_sweep
+    python pi0_inout/automate_rel_sweepp.py \\
+        --checkpoint-dir /path/to/ckpt --resume --output-dir ./automate_rel_sweep
 """
 
 from __future__ import annotations
@@ -222,10 +222,10 @@ def _build_quant_server_template(
     output_fmt: str,
 ) -> str:
     """
-    Build the --quantized-server-cmd template for run_ulp_sweep_two_servers.py.
+    Build the --quantized-server-cmd template for run_rel_sweep_two_servers.py.
 
-    {ulp_n} and {quantized_port} are left as literal placeholders — they will
-    be substituted by run_ulp_sweep_two_servers._replace_placeholders().
+    {rel_err} and {quantized_port} are left as literal placeholders — they will
+    be substituted by run_rel_sweep_two_servers._replace_placeholders().
     """
     serve_script = _THIS_DIR / "serve_quant.py"
     parts = [
@@ -236,8 +236,7 @@ def _build_quant_server_template(
         "--gpu",            "0",   # with CUDA_VISIBLE_DEVICES={gpu}, only one GPU visible
         "--input-fmt",      input_fmt,
         "--output-fmt",     output_fmt,
-        "--ulp-fmt",        output_fmt,
-        "--ulp-n",          "{ulp_n}",
+        "--rel-err",        "{rel_err}",
     ]
     if openpi_dir:
         parts += ["--openpi-dir", openpi_dir]
@@ -256,8 +255,8 @@ def _run_combo_sweep(
     quantized_port: int,
     n_obs: int,
     seed: int,
-    max_ulp_n: int,
-    ulp_step: int,
+    max_rel_err: float,
+    rel_err_step: float,
     rmse_threshold: float,
     ready_timeout: float,
     checkpoint_dir: str,
@@ -268,8 +267,8 @@ def _run_combo_sweep(
     log_fh: IO[str],
 ) -> list[dict]:
     """
-    Invoke run_ulp_sweep_two_servers.py for one (input_fmt, output_fmt) combo.
-    Returns list of {ulp_n, rmse} dicts parsed from the inner run.log.
+    Invoke run_rel_sweep_two_servers.py for one (input_fmt, output_fmt) combo.
+    Returns list of {rel_err, rmse} dicts parsed from the inner run.log.
     """
     inner_log_dir = combo_dir / "inner_logs"
     inner_log_dir.mkdir(parents=True, exist_ok=True)
@@ -284,21 +283,20 @@ def _run_combo_sweep(
         output_fmt=output_fmt,
     )
 
-    sweep_script = _THIS_DIR / "run_ulp_sweep_two_servers.py"
+    sweep_script = _THIS_DIR / "run_rel_sweep_two_servers.py"
     cmd = [
         python, str(sweep_script),
         "--base-port",          str(base_port),
         "--quantized-port",     str(quantized_port),
-        "--ulp-fmt",            output_fmt,
         "--n-obs",              str(n_obs),
         "--seed",               str(seed),
-        "--start-ulp-n",        "0",
-        "--max-ulp-n",          str(max_ulp_n),
-        "--ulp-step",           str(ulp_step),
+        "--start-rel-err",        "0",
+        "--max-rel-err",          str(max_rel_err),
+        "--rel-err-step",           str(rel_err_step),
         "--rmse-threshold",     str(rmse_threshold),
         "--ready-timeout-s",    str(ready_timeout),
         "--log-dir",            str(inner_log_dir),
-        "--kill-existing-quantized-server",   # always clean up before each ulp_n step
+        "--kill-existing-quantized-server",   # always clean up before each rel_err step
         "--quantized-server-cmd", template,
     ]
     if use_fixed_pi0_noise:
@@ -326,8 +324,8 @@ def _run_combo_sweep(
 
 def _parse_inner_log(inner_log_dir: Path) -> list[dict]:
     """
-    Find the run.log written by run_ulp_sweep_two_servers and extract
-    (ulp_n, rmse) data points plus stop reason.
+    Find the run.log written by run_rel_sweep_two_servers and extract
+    (rel_err, rmse) data points plus stop reason.
     """
     run_logs = sorted(inner_log_dir.glob("run-*/run.log"))
     if not run_logs:
@@ -336,8 +334,8 @@ def _parse_inner_log(inner_log_dir: Path) -> list[dict]:
 
     text = run_logs[-1].read_text(encoding="utf-8")
     data = []
-    for m in re.finditer(r'ulp_n=(\d+)\s+rmse=([0-9.eE+\-]+)', text):
-        data.append({"ulp_n": int(m.group(1)), "rmse": float(m.group(2))})
+    for m in re.finditer(r'rel_err=([0-9.eE+\-]+)\s+rmse=([0-9.eE+\-]+)', text):
+        data.append({"rel_err": float(m.group(1)), "rmse": float(m.group(2))})
     return data
 
 
@@ -353,15 +351,15 @@ def _stop_reason(inner_log_dir: Path) -> str:
     return "max_reached"
 
 
-def _max_tol_ulp_n(data: list[dict], threshold: float, max_ulp_n: int) -> int:
-    """Highest ulp_n with rmse < threshold; max_ulp_n if never exceeded; 0 if violated at step 1."""
-    passing = [d["ulp_n"] for d in data if d["rmse"] < threshold]
+def _max_tol_rel_err(data: list[dict], threshold: float, max_rel_err: int) -> int:
+    """Highest rel_err with rmse < threshold; max_rel_err if never exceeded; 0 if violated at step 1."""
+    passing = [d["rel_err"] for d in data if d["rmse"] < threshold]
     if not passing:
         return 0
     best = max(passing)
-    # If no data point exceeded the threshold at all, report max_ulp_n
+    # If no data point exceeded the threshold at all, report max_rel_err
     if all(d["rmse"] < threshold for d in data):
-        return max_ulp_n
+        return max_rel_err
     return best
 
 
@@ -381,13 +379,13 @@ def _write_summary_csv(results: list[dict], path: Path) -> None:
                 "combo":       combo_label(r["input_fmt"], r["output_fmt"]),
                 "input_fmt":   r["input_fmt"],
                 "output_fmt":  r["output_fmt"],
-                "ulp_n":       point["ulp_n"],
+                "rel_err":       point["rel_err"],
                 "rmse":        point["rmse"],
             })
     if not rows:
         return
     with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["combo", "input_fmt", "output_fmt", "ulp_n", "rmse"])
+        writer = csv.DictWriter(f, fieldnames=["combo", "input_fmt", "output_fmt", "rel_err", "rmse"])
         writer.writeheader()
         writer.writerows(rows)
 
@@ -408,9 +406,9 @@ def _plot_grid(results: list[dict], *, threshold: float, out_path: Path) -> None
     fmts = SWEEP_FORMATS
     n = len(fmts)
     fig, axes = plt.subplots(n, n, figsize=(4 * n, 3 * n), squeeze=False)
-    fig.suptitle("ULP noise sweep: ulp_n vs RMSE per quantization combo", fontsize=13)
+    fig.suptitle("ULP noise sweep: rel_err vs RMSE per quantization combo", fontsize=13)
 
-    # Build lookup: (input_fmt, output_fmt) → {data, max_tol_ulp_n}
+    # Build lookup: (input_fmt, output_fmt) → {data, max_tol_rel_err}
     lookup = {(r["input_fmt"], r["output_fmt"]): r for r in results}
 
     for ri, inf in enumerate(fmts):
@@ -418,12 +416,12 @@ def _plot_grid(results: list[dict], *, threshold: float, out_path: Path) -> None
             ax = axes[ri][ci]
             r = lookup.get((inf, outf))
             if r and r.get("data"):
-                xs = [d["ulp_n"] for d in r["data"]]
+                xs = [d["rel_err"] for d in r["data"]]
                 ys = [d["rmse"]  for d in r["data"]]
                 ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.5, color="steelblue")
             ax.axhline(threshold, color="red", linestyle="--", linewidth=1, label=f"thr={threshold}")
             ax.set_title(f"in={_SHORT[inf]}\nout={_SHORT[outf]}", fontsize=8)
-            ax.set_xlabel("ulp_n", fontsize=7)
+            ax.set_xlabel("rel_err", fontsize=7)
             ax.set_ylabel("RMSE", fontsize=7)
             ax.tick_params(labelsize=6)
             ax.set_ylim(bottom=0)
@@ -435,7 +433,7 @@ def _plot_grid(results: list[dict], *, threshold: float, out_path: Path) -> None
     logger.info("Saved %s", out_path)
 
 
-def _plot_heatmap(results: list[dict], *, max_ulp_n: int, out_path: Path) -> None:
+def _plot_heatmap(results: list[dict], *, max_rel_err: int, out_path: Path) -> None:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -454,11 +452,11 @@ def _plot_heatmap(results: list[dict], *, max_ulp_n: int, out_path: Path) -> Non
         for ci, outf in enumerate(fmts):
             r = lookup.get((inf, outf))
             if r is not None:
-                mat[ri, ci] = r.get("max_tol_ulp_n", 0)
+                mat[ri, ci] = r.get("max_tol_rel_err", 0)
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(mat, cmap="YlGn", vmin=0, vmax=max_ulp_n, aspect="auto")
-    fig.colorbar(im, ax=ax, label="Max tolerable ulp_n (RMSE < threshold)")
+    im = ax.imshow(mat, cmap="YlGn", vmin=0, vmax=max_rel_err, aspect="auto")
+    fig.colorbar(im, ax=ax, label="Max tolerable rel_err (RMSE < threshold)")
 
     short = [_SHORT[f] for f in fmts]
     ax.set_xticks(range(n))
@@ -474,7 +472,7 @@ def _plot_heatmap(results: list[dict], *, max_ulp_n: int, out_path: Path) -> Non
             v = mat[ri, ci]
             if not (v != v):  # not NaN
                 ax.text(ci, ri, str(int(v)), ha="center", va="center",
-                        fontsize=10, color="black" if v < max_ulp_n * 0.7 else "white")
+                        fontsize=10, color="black" if v < max_rel_err * 0.7 else "white")
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -537,7 +535,7 @@ def main() -> None:
     logger.info("Sweep: %d format combinations", len(combos))
     run_log_fh.write(f"# run_dir={run_dir}\n")
     run_log_fh.write(f"# combos={len(combos)}  n_obs={args.n_obs}  seed={args.seed}\n")
-    run_log_fh.write(f"# max_ulp_n={args.max_ulp_n}  ulp_step={args.ulp_step}  "
+    run_log_fh.write(f"# max_rel_err={args.max_rel_err}  rel_err_step={args.rel_err_step}  "
                      f"rmse_threshold={args.rmse_threshold}\n\n")
     run_log_fh.flush()
 
@@ -590,8 +588,8 @@ def main() -> None:
                 quantized_port=args.quantized_port,
                 n_obs=args.n_obs,
                 seed=args.seed,
-                max_ulp_n=args.max_ulp_n,
-                ulp_step=args.ulp_step,
+                max_rel_err=args.max_rel_err,
+                rel_err_step=args.rel_err_step,
                 rmse_threshold=args.rmse_threshold,
                 ready_timeout=args.ready_timeout,
                 checkpoint_dir=args.checkpoint_dir,
@@ -604,21 +602,21 @@ def main() -> None:
 
             inner_log_dir = combo_dir / "inner_logs"
             stop = _stop_reason(inner_log_dir)
-            max_tol = _max_tol_ulp_n(data, args.rmse_threshold, args.max_ulp_n)
+            max_tol = _max_tol_rel_err(data, args.rmse_threshold, args.max_rel_err)
 
             combo_result = {
                 "input_fmt":     input_fmt,
                 "output_fmt":    output_fmt,
                 "combo":         label,
                 "data":          data,
-                "max_tol_ulp_n": max_tol,
+                "max_tol_rel_err": max_tol,
                 "stop_reason":   stop,
             }
             (combo_dir / "results.json").write_text(json.dumps(combo_result, indent=2))
             all_results.append(combo_result)
 
             summary_line = (
-                f"{label:30s}  max_tol_ulp_n={max_tol:3d}  "
+                f"{label:30s}  max_tol_rel_err={max_tol:3d}  "
                 f"n_points={len(data):2d}  stop={stop}"
             )
             print(summary_line)
@@ -642,7 +640,7 @@ def main() -> None:
     plots_dir.mkdir(exist_ok=True)
     _plot_grid(all_results, threshold=args.rmse_threshold,
                out_path=plots_dir / "ulp_rmse_grid.png")
-    _plot_heatmap(all_results, max_ulp_n=args.max_ulp_n,
+    _plot_heatmap(all_results, max_rel_err=args.max_rel_err,
                   out_path=plots_dir / "tolerance_hmap.png")
 
     print(f"\nDone. Results in: {run_dir}")
@@ -663,7 +661,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Sweep 16 (input_fmt x output_fmt) quantization combos with ULP noise injection, "
-            "recording RMSE vs. ulp_n and generating summary plots."
+            "recording RMSE vs. rel_err and generating summary plots."
         )
     )
     p.add_argument("--checkpoint-dir", required=True,
@@ -676,12 +674,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--gpu-quant", type=int, default=1, help="CUDA device for quantized server")
     p.add_argument("--n-obs",      type=int,   default=16,  help="Observations per combo")
     p.add_argument("--seed",       type=int,   default=0)
-    p.add_argument("--max-ulp-n",  type=int,   default=5000)
-    p.add_argument("--ulp-step",   type=int,   default=1)
+    p.add_argument("--max-rel-err",  type=float, default=0.1)
+    p.add_argument("--rel-err-step",   type=float, default=1e-4)
     p.add_argument("--rmse-threshold", type=float, default=0.4)
     p.add_argument("--ready-timeout",  type=float, default=120.0,
                    help="Seconds to wait for a server to become ready")
-    p.add_argument("--output-dir", default="automate_ulp_sweep")
+    p.add_argument("--output-dir", default="automate_rel_sweep")
     p.add_argument("--resume", action="store_true",
                    help="Skip combos that already have results.json with data")
     p.add_argument("--python", default=None,

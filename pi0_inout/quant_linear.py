@@ -32,7 +32,7 @@ from typing import Optional
 
 from .quant_types import QuantFormat, quant
 from .stats_tracker import StatsTracker, Component
-from .ulp_noise import UlpNoiseConfig, inject_ulp_noise
+from .rel_noise import RelNoiseConfig, inject_rel_noise
 
 
 class QuantLinear(nn.Module):
@@ -47,6 +47,7 @@ class QuantLinear(nn.Module):
         component:    Architectural component tag (vision/language/action_*).
         layer_name:   Full dot-separated module path, used as stats key.
         tracker:      Optional StatsTracker for RMSE collection.
+        noise_cfg:    Optional RelNoiseConfig for relative-error noise injection.
     """
 
     def __init__(
@@ -57,7 +58,7 @@ class QuantLinear(nn.Module):
         component: Component,
         layer_name: str,
         tracker: Optional[StatsTracker] = None,
-        ulp_noise: Optional[UlpNoiseConfig] = None,
+        noise_cfg: Optional[RelNoiseConfig] = None,
     ) -> None:
         super().__init__()
         self.weight = linear.weight
@@ -68,7 +69,7 @@ class QuantLinear(nn.Module):
         self.component  = component
         self.layer_name = layer_name
         self.tracker    = tracker
-        self.ulp_noise  = ulp_noise
+        self.noise_cfg  = noise_cfg
 
         self.in_features  = linear.in_features
         self.out_features = linear.out_features
@@ -87,14 +88,10 @@ class QuantLinear(nn.Module):
         b_q = quant(b_f32, self.input_fmt) if b_f32 is not None else None  # bias
 
         # ── Accumulate in float32: F.linear + bias add ──────────────────────────
-        # Split F.linear and bias-add so we can optionally inject ULP noise into the output specifically.
+        # Split F.linear and bias-add so we can optionally inject noise into the matmul output.
         y_mm = F.linear(x_q, w_q, None)
-        if self.ulp_noise is not None and self.ulp_noise.enabled():
-            y_mm = inject_ulp_noise(
-                y_mm,
-                n_ulp=self.ulp_noise.n_ulp,
-                ulp_fmt=self.ulp_noise.ulp_fmt,
-            )
+        if self.noise_cfg is not None and self.noise_cfg.enabled():
+            y_mm = inject_rel_noise(y_mm, rel_err=self.noise_cfg.rel_err)
         y_accum = y_mm if b_q is None else (y_mm + b_q)
 
         # ── Write result to output memory in output_fmt ───────────────────────
@@ -135,8 +132,8 @@ class QuantLinearMatVec(nn.Module):
         vector_in_fmt must equal matrix_out_fmt (bias add consumes matmul output).
 
     Optional:
-        ulp_noise can be injected into the raw matmul output (before matrix_out_fmt quantization),
-        with ULP defined in ulp_noise.ulp_fmt.
+        noise_cfg injects relative-error noise into the raw matmul output
+        (before matrix_out_fmt quantization).
     """
 
     def __init__(
@@ -149,7 +146,7 @@ class QuantLinearMatVec(nn.Module):
         component: Component,
         layer_name: str,
         tracker: Optional[StatsTracker] = None,
-        ulp_noise: Optional[UlpNoiseConfig] = None,
+        noise_cfg: Optional[RelNoiseConfig] = None,
     ) -> None:
         super().__init__()
         self.weight = linear.weight
@@ -163,7 +160,7 @@ class QuantLinearMatVec(nn.Module):
         self.component = component
         self.layer_name = layer_name
         self.tracker = tracker
-        self.ulp_noise = ulp_noise
+        self.noise_cfg = noise_cfg
 
         self.in_features = linear.in_features
         self.out_features = linear.out_features
@@ -182,13 +179,9 @@ class QuantLinearMatVec(nn.Module):
         # Matmul output (float32 arithmetic on quantized-grid values)
         y_mm = F.linear(x_q, w_q, None)
 
-        # Inject ULP noise into matmul output (before matmul-output quantization)
-        if self.ulp_noise is not None and self.ulp_noise.enabled():
-            y_mm = inject_ulp_noise(
-                y_mm,
-                n_ulp=self.ulp_noise.n_ulp,
-                ulp_fmt=self.ulp_noise.ulp_fmt,
-            )
+        # Inject relative-error noise into matmul output (before matmul-output quantization)
+        if self.noise_cfg is not None and self.noise_cfg.enabled():
+            y_mm = inject_rel_noise(y_mm, rel_err=self.noise_cfg.rel_err)
 
         # Matrix output quantization (feeds bias add)
         y_mm_q = quant(y_mm, self.matrix_out_fmt)

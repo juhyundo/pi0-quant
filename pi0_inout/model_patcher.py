@@ -79,7 +79,7 @@ import torch.nn.functional as F
 from .quant_linear import QuantLinear, QuantLinearMatVec
 from .quant_types import QuantFormat, quant
 from .stats_tracker import Component, StatsTracker
-from .ulp_noise import UlpNoiseConfig
+from .rel_noise import RelNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def patch_model(
     output_fmt: QuantFormat,
     tracker: Optional[StatsTracker] = None,
     active_groups: Optional[set[QuantGroup]] = None,
-    ulp_noise: Optional[UlpNoiseConfig] = None,
+    noise_cfg: Optional[RelNoiseConfig] = None,
     skip_components: Optional[set[Component]] = None,
     verbose: bool = False,
 ) -> nn.Module:
@@ -210,7 +210,7 @@ def patch_model(
             component=component,
             layer_name=name,
             tracker=tracker,
-            ulp_noise=ulp_noise,
+            noise_cfg=noise_cfg,
         )
 
         # Pre-register with tracker so summary() works even if some layers
@@ -250,7 +250,7 @@ def patch_model_matvec(
     matrix_out_fmt: QuantFormat,
     vector_out_fmt: QuantFormat,
     tracker: Optional[StatsTracker] = None,
-    ulp_noise: Optional[UlpNoiseConfig] = None,
+    noise_cfg: Optional[RelNoiseConfig] = None,
     skip_components: Optional[set[Component]] = None,
     verbose: bool = False,
 ) -> nn.Module:
@@ -280,7 +280,7 @@ def patch_model_matvec(
             component=component,
             layer_name=name,
             tracker=tracker,
-            ulp_noise=ulp_noise,
+            noise_cfg=noise_cfg,
         )
 
         if tracker is not None:
@@ -331,16 +331,16 @@ def unpatch_model(model: nn.Module) -> nn.Module:
     return model
 
 
-def set_ulp_noise(model: nn.Module, ulp_noise: Optional[UlpNoiseConfig]) -> None:
+def set_noise_cfg(model: nn.Module, noise_cfg: Optional[RelNoiseConfig]) -> None:
     """
-    Update the ULP-noise configuration on all patched Linear layers in-place.
+    Update the noise configuration on all patched Linear layers in-place.
 
-    This enables changing ULP injection at runtime (without re-patching), as long
+    This enables changing noise injection at runtime (without re-patching), as long
     as the model has already been patched with QuantLinear / QuantLinearMatVec.
     """
     for _, module in model.named_modules():
         if isinstance(module, (QuantLinear, QuantLinearMatVec)):
-            module.ulp_noise = ulp_noise
+            module.noise_cfg = noise_cfg
 
 
 # ---------------------------------------------------------------------------

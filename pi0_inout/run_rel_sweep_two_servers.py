@@ -1,12 +1,12 @@
 """
-run_ulp_sweep_two_servers.py
-----------------------------
-Automate an ULP-noise sweep using two policy servers:
+run_rel_sweep_two_servers.py
+----------------------------------------------------------------
+Automate a relative-error noise sweep using two policy servers:
 
   - base server, already running (default port 8000)
-  - quantized server, optionally (re)started per sweep step with --ulp-n = 1,2,3,... (default port 8002)
+  - quantized server, optionally (re)started per sweep step with --rel-err = start,start+step,... (default port 8002)
 
-For each n:
+For each rel_err value:
   - query both servers on the same set of observations
   - compute action RMSE
   - stop when RMSE >= threshold (default 0.4)
@@ -39,8 +39,6 @@ for _p in [str(_REPO_ROOT), str(_OPENPI_CLIENT_SRC)]:
         sys.path.insert(0, _p)
 
 from openpi_client import websocket_client_policy as _ws
-
-from pi0_inout.quant_types import QuantFormat
 
 logger = logging.getLogger(__name__)
 
@@ -246,25 +244,24 @@ def _kill_listeners_on_port(port: int, *, timeout_s: float = 10.0) -> None:
 def _start_quantized_server(
     quantized_server_cmd_template: str,
     *,
-    ulp_n: int,
+    rel_err: float,
     quantized_port: int,
     defaults: dict[str, Any],
     stdout: Optional[IO[str]] = None,
 ) -> subprocess.Popen:
     """
-    Start the quantized server for the given ulp_n.
+    Start the quantized server for the given rel_err.
 
-    The template is a shell-ish command string. If it contains '{ulp_n}', it will be replaced.
-    Otherwise '--ulp-n <n>' will be appended.
+    The template is a shell-ish command string. If it contains '{rel_err}', it will be replaced.
+    Otherwise '--rel-err <v>' will be appended.
     """
     cmd_str = _replace_placeholders(
         quantized_server_cmd_template,
         {
-            "ulp_n": ulp_n,
+            "rel_err": rel_err,
             "quantized_port": quantized_port,
             "input_fmt": defaults.get("input_fmt"),
             "output_fmt": defaults.get("output_fmt"),
-            "ulp_fmt": defaults.get("ulp_fmt"),
             "mat_in_fmt": defaults.get("mat_in_fmt"),
             "mat_out_fmt": defaults.get("mat_out_fmt"),
             "vec_out_fmt": defaults.get("vec_out_fmt"),
@@ -273,7 +270,7 @@ def _start_quantized_server(
     argv = shlex.split(cmd_str)
 
     # Always enforce the sweep value + port.
-    _argv_set_kv(argv, "--ulp-n", str(ulp_n))
+    _argv_set_kv(argv, "--rel-err", str(rel_err))
     _argv_set_kv(argv, "--port", str(quantized_port))
 
     # If the template omits these, auto-fill from defaults (usually base server).
@@ -291,9 +288,6 @@ def _start_quantized_server(
             _argv_set_kv(argv, "--input-fmt", str(defaults["input_fmt"]))
         if defaults.get("output_fmt") and not _argv_has(argv, "--output-fmt"):
             _argv_set_kv(argv, "--output-fmt", str(defaults["output_fmt"]))
-
-    if defaults.get("ulp_fmt") and not _argv_has(argv, "--ulp-fmt"):
-        _argv_set_kv(argv, "--ulp-fmt", str(defaults["ulp_fmt"]))
 
     return subprocess.Popen(
         argv,
@@ -323,18 +317,13 @@ def main() -> None:
 
     p.add_argument("--n-obs", type=int, default=16)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument(
-        "--ulp-fmt",
-        default=None,
-        choices=[f.value for f in QuantFormat],
-        help="Format used to compute ULP(base) for reporting. If unset, inferred from base server metadata (ulp_fmt → output_fmt → bfloat16).",
-    )
     p.add_argument("--rmse-threshold", type=float, default=0.4)
-    p.add_argument("--start-ulp-n", type=int, default=1,
-                   help="Starting ULP level for the sweep (inclusive).")
-    p.add_argument("--ulp-step", type=int, default=1,
-                   help="Increment for ulp_n each sweep step (e.g. 1 → 1,2,3...; 5 → 5,10,15...).")
-    p.add_argument("--max-ulp-n", type=int, default=32)
+    p.add_argument("--start-rel-err", type=float, default=1e-4,
+                   help="Starting relative-error level for the sweep (inclusive).")
+    p.add_argument("--rel-err-step", type=float, default=1e-4,
+                   help="Increment for rel_err each sweep step (e.g. 1e-4 → 1e-4,2e-4,3e-4...).")
+    p.add_argument("--max-rel-err", type=float, default=0.1,
+                   help="Maximum rel_err to sweep up to (inclusive).")
     p.add_argument("--ready-timeout-s", type=float, default=60.0)
     p.add_argument("--use-fixed-pi0-noise", action="store_true",
                    help="If set, inject deterministic obs['pi0_noise'] (requires server to consume it)")
@@ -345,10 +334,10 @@ def main() -> None:
         "--quantized-server-cmd",
         default=None,
         help=(
-            "If set, the script will (re)start the quantized server for each ulp_n. "
-            "You may use placeholders like '{ulp_n}', '{quantized_port}', '{input_fmt}', '{output_fmt}', '{ulp_fmt}', "
+            "If set, the script will (re)start the quantized server for each rel_err. "
+            "You may use placeholders like '{rel_err}', '{quantized_port}', '{input_fmt}', '{output_fmt}', "
             "'{mat_in_fmt}', '{mat_out_fmt}', '{vec_out_fmt}'. "
-            "If you omit format/ulp flags entirely, they will be auto-filled from the base server's metadata (falling back to bfloat16)."
+            "If you omit format flags entirely, they will be auto-filled from the base server's metadata (falling back to bfloat16)."
         ),
     )
 
@@ -368,11 +357,10 @@ def main() -> None:
 
     base = _ws.WebsocketClientPolicy(host=args.base_host, port=args.base_port)
     base_q = _quant_cfg(base)
-    eval_ulp_fmt = QuantFormat(args.ulp_fmt or str(base_q.get("ulp_fmt") or base_q.get("output_fmt") or "bfloat16"))
 
-    start_ulp_n = max(0, int(args.start_ulp_n))
-    ulp_step = max(1, int(args.ulp_step))
-    max_ulp_n = max(0, int(args.max_ulp_n))
+    start_rel_err = max(0.0, float(args.start_rel_err))
+    rel_err_step  = max(1e-10, float(args.rel_err_step))
+    max_rel_err   = max(0.0, float(args.max_rel_err))
 
     log_root = Path(args.log_dir)
     if not log_root.is_absolute():
@@ -392,15 +380,15 @@ def main() -> None:
 
     run_log.write(f"# run_dir={run_dir}\n")
     run_log.write(f"# base={args.base_host}:{args.base_port}  quantized={args.quantized_host}:{args.quantized_port}\n")
-    run_log.write(f"# ulp_fmt(eval)={eval_ulp_fmt.value}  n_obs={args.n_obs}  seed={args.seed}\n")
-    run_log.write(f"# sweep: start_ulp_n={start_ulp_n}  ulp_step={ulp_step}  max_ulp_n={max_ulp_n}\n")
+    run_log.write(f"# n_obs={args.n_obs}  seed={args.seed}\n")
+    run_log.write(f"# sweep: start_rel_err={start_rel_err:.4e}  rel_err_step={rel_err_step:.4e}  max_rel_err={max_rel_err:.4e}\n")
     run_log.write(f"# use_fixed_pi0_noise={bool(use_fixed_pi0_noise)}\n")
     run_log.write(f"# quantized_server_cmd={args.quantized_server_cmd}\n\n")
     if base_q:
         run_log.write(f"# base_quant={base_q}\n\n")
     run_log.flush()
 
-    # Pre-generate observations so each ulp_n sees identical inputs.
+    # Pre-generate observations so each rel_err step sees identical inputs.
     observations: list[dict] = []
     for _ in range(args.n_obs):
         obs = _random_observation_droid(rng)
@@ -408,14 +396,18 @@ def main() -> None:
             obs = _with_fixed_pi0_noise(obs, rng=rng, action_horizon=action_horizon, action_dim=action_dim)
         observations.append(obs)
 
+    # Build the sweep values: start_rel_err, start+step, start+2*step, ... up to max_rel_err
+    n_steps = max(1, round((max_rel_err - start_rel_err) / rel_err_step) + 1)
+    sweep_values = [start_rel_err + i * rel_err_step for i in range(n_steps)
+                    if start_rel_err + i * rel_err_step <= max_rel_err + 1e-12]
+
     quantized_proc: Optional[subprocess.Popen] = None
     quantized_log_fh: Optional[IO[str]] = None
     consecutive_nan = 0
     try:
-        for n in range(start_ulp_n, max_ulp_n + 1, ulp_step):
+        for rel_err in (sweep_values if args.quantized_server_cmd is not None else [None]):
             if args.quantized_server_cmd is None:
-                # Evaluate whatever is already running on quantized-port (single step).
-                n = -1
+                rel_err = None  # evaluate whatever is running
             else:
                 # Restart-per-step mode.
                 if quantized_proc is not None and quantized_proc.poll() is None:
@@ -426,11 +418,11 @@ def main() -> None:
                     quantized_log_fh.close()
                     quantized_log_fh = None
 
-                step_tag = f"ulp_n={n}"
+                step_tag = f"rel_err={rel_err:.4e}"
                 quantized_log_fh = _open_step_log(log_dir=run_dir, tag=step_tag)
                 quantized_log_fh.write(f"# {step_tag}\n")
                 quantized_log_fh.write(f"# base={args.base_host}:{args.base_port}  quantized={args.quantized_host}:{args.quantized_port}\n")
-                quantized_log_fh.write(f"# ulp_fmt(eval)={eval_ulp_fmt.value}  n_obs={args.n_obs}  seed={args.seed}\n")
+                quantized_log_fh.write(f"# n_obs={args.n_obs}  seed={args.seed}\n")
                 quantized_log_fh.write(f"# use_fixed_pi0_noise={bool(use_fixed_pi0_noise)}\n")
                 quantized_log_fh.write(f"# quantized_server_cmd={args.quantized_server_cmd}\n\n")
                 if base_q:
@@ -444,22 +436,21 @@ def main() -> None:
                     "mat_in_fmt": base_q.get("mat_in_fmt", "bfloat16"),
                     "mat_out_fmt": base_q.get("mat_out_fmt", "bfloat16"),
                     "vec_out_fmt": base_q.get("vec_out_fmt", "bfloat16"),
-                    "ulp_fmt": base_q.get("ulp_fmt") or "bfloat16",
                 }
                 quantized_proc = _start_quantized_server(
                     args.quantized_server_cmd,
-                    ulp_n=n,
+                    rel_err=rel_err,
                     quantized_port=args.quantized_port,
                     defaults=defaults,
                     stdout=quantized_log_fh,
                 )
 
             if args.quantized_server_cmd is None and quantized_log_fh is None:
-                step_tag = "ulp_n=as-is"
+                step_tag = "rel_err=as-is"
                 quantized_log_fh = _open_step_log(log_dir=run_dir, tag=step_tag)
                 quantized_log_fh.write(f"# {step_tag}\n")
                 quantized_log_fh.write(f"# base={args.base_host}:{args.base_port}  quantized={args.quantized_host}:{args.quantized_port}\n")
-                quantized_log_fh.write(f"# ulp_fmt(eval)={eval_ulp_fmt.value}  n_obs={args.n_obs}  seed={args.seed}\n")
+                quantized_log_fh.write(f"# n_obs={args.n_obs}  seed={args.seed}\n")
                 quantized_log_fh.write(f"# use_fixed_pi0_noise={bool(use_fixed_pi0_noise)}\n")
                 quantized_log_fh.write(f"# quantized_server_cmd=None (evaluate existing server)\n\n")
                 if base_q:
@@ -476,8 +467,8 @@ def main() -> None:
                 quantized_actions.append(_to_actions_tensor(quantized.infer(obs)))
 
             m = _metrics(base_actions, quantized_actions)
-            tag = f"ulp_n={n}" if n >= 0 else "ulp_n=<as-is>"
-            line = f"{tag:14s}  rmse={m.rmse:.4e}"
+            tag = f"rel_err={rel_err:.4e}" if rel_err is not None else "rel_err=<as-is>"
+            line = f"{tag:20s}  rmse={m.rmse:.4e}"
             print(line)
             run_log.write(line + "\n")
             run_log.flush()
@@ -485,7 +476,7 @@ def main() -> None:
                 quantized_log_fh.write(f"\n# result: {line}\n")
                 quantized_log_fh.flush()
 
-            if n >= 0 and m.rmse >= args.rmse_threshold:
+            if rel_err is not None and m.rmse >= args.rmse_threshold:
                 print(f"STOP: threshold violated (rmse >= {args.rmse_threshold})")
                 break
 

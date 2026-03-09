@@ -40,7 +40,7 @@ from .model_patcher import (
     patch_attn_sdpa, unpatch_attn_sdpa,
 )
 from .stats_tracker import StatsTracker, Component, StatsReport
-from .ulp_noise import UlpNoiseConfig, ulp_step, inject_ulp_noise
+from .rel_noise import RelNoiseConfig, inject_rel_noise
 from .eval_harness  import (
     QuantConfig,
     EvalResult,
@@ -72,10 +72,9 @@ __all__ = [
     "ALL_GROUPS",
     "patch_attn_sdpa",
     "unpatch_attn_sdpa",
-    # ULP utilities
-    "UlpNoiseConfig",
-    "ulp_step",
-    "inject_ulp_noise",
+    # Relative-error noise utilities
+    "RelNoiseConfig",
+    "inject_rel_noise",
     # Stats
     "StatsTracker",
     "Component",

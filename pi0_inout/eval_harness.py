@@ -51,7 +51,7 @@ import torch.nn as nn
 from .quant_types import QuantFormat
 from .model_patcher import patch_model, patch_model_matvec, unpatch_model, count_layers
 from .stats_tracker import StatsTracker, StatsReport, Component
-from .ulp_noise import UlpNoiseConfig
+from .rel_noise import RelNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ class QuantConfig:
     """
     input_fmt:  QuantFormat = QuantFormat.BFLOAT16
     output_fmt: QuantFormat = QuantFormat.BFLOAT16
-    ulp_noise: Optional[UlpNoiseConfig] = None
+    noise_cfg: Optional[RelNoiseConfig] = None
     skip_components: frozenset[Component] = field(default_factory=frozenset)
     label: str = ""
 
@@ -90,7 +90,7 @@ class MatVecQuantConfig:
     matrix_in_fmt: QuantFormat = QuantFormat.BFLOAT16
     matrix_out_fmt: QuantFormat = QuantFormat.BFLOAT16
     vector_out_fmt: QuantFormat = QuantFormat.BFLOAT16
-    ulp_noise: Optional[UlpNoiseConfig] = None
+    noise_cfg: Optional[RelNoiseConfig] = None
     skip_components: frozenset[Component] = field(default_factory=frozenset)
     label: str = ""
 
@@ -199,7 +199,7 @@ def run_quantization_eval(
         input_fmt=config.input_fmt,
         output_fmt=config.output_fmt,
         tracker=tracker,
-        ulp_noise=config.ulp_noise,
+        noise_cfg=config.noise_cfg,
         skip_components=set(config.skip_components),
         verbose=False,
     )
@@ -272,7 +272,7 @@ def run_quantization_eval_matvec(
         matrix_out_fmt=config.matrix_out_fmt,
         vector_out_fmt=config.vector_out_fmt,
         tracker=tracker,
-        ulp_noise=config.ulp_noise,
+        noise_cfg=config.noise_cfg,
         skip_components=set(config.skip_components),
         verbose=False,
     )
@@ -300,10 +300,8 @@ def run_quantization_eval_matvec(
         "matrix_in_fmt": config.matrix_in_fmt.value,
         "matrix_out_fmt": config.matrix_out_fmt.value,
         "vector_out_fmt": config.vector_out_fmt.value,
-        "ulp_noise": None if config.ulp_noise is None else {
-            "n_ulp": config.ulp_noise.n_ulp,
-            "mode": config.ulp_noise.mode.value,
-            "ulp_fmt": config.ulp_noise.ulp_fmt.value,
+        "noise_cfg": None if config.noise_cfg is None else {
+            "rel_err": config.noise_cfg.rel_err,
         },
         "action_rmse": action_rmse,
         "violates_rmse": violates_rmse,

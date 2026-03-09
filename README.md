@@ -192,9 +192,9 @@ Run `python pi0_inout/run_benchmark.py --help` for all options, including
 continue an interrupted run.
 
 
-## Automate ULP sweep (`automate_ulp_sweep.py`)
+## Automate relative-error sweep (`automate_rel_sweep.py`)
 
-`automate_ulp_sweep.py` automates iterations of different combinations of input / output format of run_ulp_sweep_two_servers.py.
+`automate_rel_sweep.py` automates iterations of different combinations of input / output format of `run_rel_sweep_two_servers.py`.
 
 **What it does:**
 
@@ -202,37 +202,37 @@ continue an interrupted run.
    and keeps it alive for the entire run.
 2. Iterates over all **16 format combinations** `(input_fmt × output_fmt)` drawn
    from `{float8_e4m3, float8_e5m2, float16, bfloat16}`.
-3. For each combo it calls `run_ulp_sweep_two_servers.py` as a subprocess.
+3. For each combo it calls `run_rel_sweep_two_servers.py` as a subprocess.
    That script restarts the quantized server (`serve_quant.py`) on `--gpu-quant`
-   for each `ulp_n` step, queries both servers with the same random DROID observations,
-   and stops when `RMSE >= --rmse-threshold` and `nan repeated three times`.
+   for each `rel_err` step, queries both servers with the same random DROID observations,
+   and stops when `RMSE >= --rmse-threshold` or nan repeats three times.
 4. Collects results and writes:
    - per-combo `results.json` and the inner server logs
-   - `summary.csv` — one row per combo with `max_tol_ulp_n`
-   - `ulp_rmse_grid.png` — 4×4 grid of RMSE-vs-ulp_n curves
-   - `tolerance_hmap.png` — heatmap of max tolerable `ulp_n` per combo
+   - `summary.csv` — one row per combo with `max_tol_rel_err`
+   - `ulp_rmse_grid.png` — 4×4 grid of RMSE-vs-rel_err curves
+   - `tolerance_hmap.png` — heatmap of max tolerable `rel_err` per combo
 
 ### Usage
 
 ```bash
 # Standard run w/ pi0_droid config, base on GPU 1, quantized on GPU 2:
-uv run pi0_inout/automate_ulp_sweep.py \
+uv run pi0_inout/automate_rel_sweep.py \
     --checkpoint-dir /path/to/pi0_droid_jointpos_safetensors \
     --config pi0_droid \
     --base-port 8001 --gpu-base 1 \
     --gpu-quant 2 --quantized-port 8002 \
-    --max-ulp-n 1000 --ulp-step 10 \
-    --output-dir automate_ulp_sweep
+    --max-rel-err 0.1 --rel-err-step 1e-4 \
+    --output-dir automate_rel_sweep
 
 # Run only specific combos
-python pi0_inout/automate_ulp_sweep.py \
+python pi0_inout/automate_rel_sweep.py \
     --checkpoint-dir /path/to/pi0_droid_jointpos_safetensors \
     --only-combos e5m2:fp16,fp16:fp16,bf16:fp16 \
     --config pi0_droid \
     --base-port 8001 --gpu-base 1 \
     --gpu-quant 2 --quantized-port 8002 \
-    --max-ulp-n 1000 --ulp-step 10 \
-    --output-dir automate_ulp_sweep
+    --max-rel-err 0.1 --rel-err-step 1e-4 \
+    --output-dir automate_rel_sweep
 ```
 
 ### Options
@@ -241,13 +241,13 @@ python pi0_inout/automate_ulp_sweep.py \
 |---|---|---|
 | `--checkpoint-dir` | *(required)* | Directory containing `model.safetensors` |
 | `--config` | `pi05_droid_jointpos_polaris` | openpi training config name |
-| `--output-dir` | `automate_ulp_sweep` | Where run directories and plots are written |
+| `--output-dir` | `automate_rel_sweep` | Where run directories and plots are written |
 | `--gpu-base` | `0` | CUDA device for the base (reference) server |
 | `--gpu-quant` | `1` | CUDA device for the quantized server |
 | `--base-port` | `8000` | WebSocket port for the base server |
 | `--quantized-port` | `8002` | WebSocket port for the quantized server |
-| `--max-ulp-n` | `5000` | Maximum `ulp_n` to sweep up to |
-| `--ulp-step` | `1` | Increment per sweep step (e.g. `10` → 10, 20, 30 …) |
+| `--max-rel-err` | `0.1` | Maximum relative-error level to sweep up to |
+| `--rel-err-step` | `1e-4` | Increment per sweep step |
 | `--n-obs` | `16` | Random DROID observations per combo |
 | `--seed` | `0` | RNG seed |
 | `--rmse-threshold` | `0.4` | Max rmse threshold default = 0.4 |
@@ -259,21 +259,21 @@ python pi0_inout/automate_ulp_sweep.py \
 
 ---
 
-## ULP sweep (two servers)
+## Relative-error sweep (two servers)
 
-`run_ulp_sweep_two_servers.py` compares a **base server** vs a **quantized server** over the same randomly generated observations, and sweeps `--ulp-n` on the quantized side. Base server and quantized server must be run on **different CUDA_VISIBLE_DEVICES** as each server is quite heavy to run.
+`run_rel_sweep_two_servers.py` compares a **base server** vs a **quantized server** over the same randomly generated observations, and sweeps `--rel-err` on the quantized side. Base server and quantized server must be run on **different CUDA_VISIBLE_DEVICES** as each server is quite heavy to run.
 
 ### Typical usage
 
-- Start a base server (no ULP noise) on some port
-- Run the sweep, letting it (re)launch the quantized (with ULP noise) server each step:
+- Start a base server (no noise) on some port
+- Run the sweep, letting it (re)launch the quantized (with relative-error noise) server each step:
 
 ```bash
-python -m pi0_inout.run_ulp_sweep_two_servers \
+python -m pi0_inout.run_rel_sweep_two_servers \
     --base-port 8000 \
     --quantized-port 8001 \
-    --start-ulp-n 0 --ulp-step 50 --max-ulp-n 5000 \
-    --quantized-server-cmd 'env CUDA_VISIBLE_DEVICES=2 python pi0_inout/serve_quant.py --openpi-dir /path/to/openpi --checkpoint-dir /path/to/checkpoint --config pi0_droid --gpu 0 --input-fmt float8_e5m2 --output-fmt bfloat16 --ulp-fmt bfloat16'
+    --start-rel-err 1e-4 --rel-err-step 1e-4 --max-rel-err 0.1 \
+    --quantized-server-cmd 'env CUDA_VISIBLE_DEVICES=2 python pi0_inout/serve_quant.py --openpi-dir /path/to/openpi --checkpoint-dir /path/to/checkpoint --config pi0_droid --gpu 0 --input-fmt float8_e5m2 --output-fmt bfloat16'
 ```
 
 If you omit `--quantized-server-cmd`, the script will **evaluate whatever is already running** on `--quantized-port` (single step).
@@ -286,9 +286,9 @@ If you omit `--quantized-server-cmd`, the script will **evaluate whatever is alr
   - `--quantized-host` (default `127.0.0.1`)
   - `--quantized-port` (default `8002`)
 - **sweep controls**
-  - `--start-ulp-n` (default `1`)
-  - `--ulp-step` (default `1`)
-  - `--max-ulp-n` (default `32`)
+  - `--start-rel-err` (default `1e-4`)
+  - `--rel-err-step` (default `1e-4`)
+  - `--max-rel-err` (default `0.1`)
   - `--rmse-threshold` (default `0.4`, stops when `rmse >= threshold`)
   - `--ready-timeout-s` (default `60.0`)
   - `--n-obs` (default `16`)
@@ -297,7 +297,6 @@ If you omit `--quantized-server-cmd`, the script will **evaluate whatever is alr
   - `--quantized-server-cmd`: command template used to (re)start the quantized server for each step
   - `--kill-existing-quantized-server` / `--no-kill-existing-quantized-server` (default: kill)
 - **misc**
-  - `--ulp-fmt`: reporting format (defaults to inferred base-server metadata: `ulp_fmt → output_fmt → bfloat16`)
   - `--use-fixed-pi0-noise`: inject deterministic `obs["pi0_noise"]` (requires server to consume it)
   - `--log-dir`: where step logs go (default `./ulp_sweep_logs`)
 
@@ -305,10 +304,9 @@ If you omit `--quantized-server-cmd`, the script will **evaluate whatever is alr
 
 The sweep performs simple string replacement on these placeholders before launching the quantized server:
 
-- `{ulp_n}`
+- `{rel_err}`
 - `{quantized_port}`
 - `{input_fmt}`, `{output_fmt}`
-- `{ulp_fmt}`
 - `{mat_in_fmt}`, `{mat_out_fmt}`, `{vec_out_fmt}`
 
 ## One-shot server comparison (`run_ulp_server_experiment.py`)
@@ -316,15 +314,15 @@ The sweep performs simple string replacement on these placeholders before launch
 `run_ulp_server_experiment.py` is a **standalone** manual tool for a single
 RMSE measurement between two already-running servers.
 
-**How it differs from `run_ulp_sweep_two_servers.py`:**
+**How it differs from `run_rel_sweep_two_servers.py`:**
 
-| | `run_ulp_server_experiment.py` | `run_ulp_sweep_two_servers.py` |
+| | `run_ulp_server_experiment.py` | `run_rel_sweep_two_servers.py` |
 |---|---|---|
 | Server management | None — base and quantized servers both must already be running | Can (re)start quantized server per step |
-| Sweep over `ulp_n` | No — single evaluation | Yes — sweeps start→max, stops at threshold |
+| Sweep over `rel_err` | No — single evaluation | Yes — sweeps start→max, stops at threshold |
 | Log files | No — stdout only | Yes — per-step `.log` files |
 | `pi0_noise` injection | Always (hardcoded) | Optional (`--use-fixed-pi0-noise`) |
-| Typical use | Quick manual spot-check | Automated ULP tolerance characterization |
+| Typical use | Quick manual spot-check | Automated relative-error tolerance characterization |
 
 ### Usage
 
@@ -361,8 +359,8 @@ pi0_inout/
 ├── stats_tracker.py            # StatsTracker: per-layer Welford RMSE accumulator
 ├── eval_harness.py             # run_quantization_eval(), run_sweep() (no WebSocket needed)
 ├── serve_quant.py              # WebSocket server with quantized Pi0Pytorch
-├── automate_ulp_sweep.py     # Top-level orchestrator: sweeps 16 format combos × ULP levels
-├── run_ulp_sweep_two_servers.py # RMSE sweeps between base and varying ulp on quantized server
+├── automate_rel_sweep.py       # Top-level orchestrator: sweeps 16 format combos × rel_err levels
+├── run_rel_sweep_two_servers.py # RMSE sweeps between base and varying rel_err on quantized server
 ├── run_ulp_server_experiment.py # One-shot RMSE comparison between two already-running servers
 ├── run_benchmark.py            # Full sweep orchestrator (spawns server + sim-evals)
 └── _jax_stubs.py               # Stub modules so Pi0Pytorch loads without JAX

@@ -83,7 +83,7 @@ from pi0_inout.model_patcher import (
 )
 from pi0_inout.quant_linear import QuantLinear
 from pi0_inout.stats_tracker import StatsTracker
-from pi0_inout.ulp_noise import UlpNoiseConfig, ulp_step
+from pi0_inout.rel_noise import RelNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -646,16 +646,11 @@ def main() -> None:
 
     active_groups = {QuantGroup(g) for g in args.quantize_components}
 
-    # ULP noise injection into Linear matmul outputs
-    ulp_noise = None
-    if args.ulp_n and args.ulp_n > 0:
-        ulp_fmt_val = args.ulp_fmt if args.ulp_fmt is not None else args.output_fmt
-        ulp_noise = UlpNoiseConfig(
-            n_ulp=args.ulp_n,
-            ulp_fmt=QuantFormat(ulp_fmt_val),
-        )
-        _ulp_at_1 = float(ulp_step(torch.tensor(1.0), QuantFormat(ulp_fmt_val)).item())
-        logger.info(f"ULP noise: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}  ulp_n={args.ulp_n}  ulp_fmt={ulp_fmt_val}  ulp={_ulp_at_1:.4e}")
+    # Relative-error noise injection into Linear matmul outputs
+    noise_cfg = None
+    if args.rel_err and args.rel_err > 0.0:
+        noise_cfg = RelNoiseConfig(rel_err=args.rel_err)
+        logger.info(f"Relative-error noise: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}  rel_err={args.rel_err:.4e}")
 
     tracker = StatsTracker()
     patch_model(
@@ -664,7 +659,7 @@ def main() -> None:
         output_fmt=output_fmt,
         tracker=tracker,
         active_groups=active_groups,
-        ulp_noise=ulp_noise,
+        noise_cfg=noise_cfg,
         verbose=False,
     )
     attn_handles = patch_attn_sdpa(
@@ -810,12 +805,9 @@ def parse_args() -> argparse.Namespace:
                    choices=[f.value for f in QuantFormat],
                    help="Vector output format (final output after bias add)")
 
-    # Optional: ULP noise injection into matmul outputs
-    p.add_argument("--ulp-n", type=int, default=0,
-                   help="Inject +/- n ULP noise into each Linear matmul output (0 disables)")
-    p.add_argument("--ulp-fmt", default=None,
-                   choices=[f.value for f in QuantFormat],
-                   help="Format whose ULP grid defines the step size (default: same as --output-fmt)")
+    # Optional: relative-error noise injection into matmul outputs
+    p.add_argument("--rel-err", type=float, default=0.0,
+                   help="Inject +/- rel_err * |y| noise into each Linear matmul output (0 disables)")
 
     # Output
     p.add_argument("--stats-output", default=None,
