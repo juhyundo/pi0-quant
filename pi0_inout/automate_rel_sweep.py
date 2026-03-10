@@ -67,6 +67,9 @@ _SHORT = {
 
 def format_combos(only: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
     all_combos = [(inf, outf) for inf in SWEEP_FORMATS for outf in SWEEP_FORMATS]
+    # Always run bf16:bf16 first (baseline sanity check)
+    bf16_bf16 = ("bfloat16", "bfloat16")
+    all_combos = [bf16_bf16] + [c for c in all_combos if c != bf16_bf16]
     if only:
         return [c for c in all_combos if c in only]
     return all_combos
