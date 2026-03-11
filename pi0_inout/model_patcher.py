@@ -76,7 +76,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .quant_linear import QuantLinear, QuantLinearMatVec
+from .quant_linear import QuantLinear
 from .quant_types import QuantFormat, quant
 from .stats_tracker import Component, StatsTracker
 from .rel_noise import RelNoiseConfig
@@ -243,69 +243,6 @@ def patch_model(
     return model
 
 
-def patch_model_matvec(
-    model: nn.Module,
-    *,
-    matrix_in_fmt: QuantFormat,
-    matrix_out_fmt: QuantFormat,
-    vector_out_fmt: QuantFormat,
-    tracker: Optional[StatsTracker] = None,
-    noise_cfg: Optional[RelNoiseConfig] = None,
-    skip_components: Optional[set[Component]] = None,
-    verbose: bool = False,
-) -> nn.Module:
-    """
-    Replace every nn.Linear in `model` with QuantLinearMatVec in-place.
-
-    Constraint enforced by design:
-        vector_in_fmt == matrix_out_fmt
-    """
-    skip_components = skip_components or set()
-    n_replaced = 0
-    n_skipped = 0
-
-    for name, module in list(_iter_named_linear(model)):
-        component = _infer_component(name)
-        if component in skip_components:
-            n_skipped += 1
-            if verbose:
-                print(f"  SKIP  {name}  [{component.value}]")
-            continue
-
-        quant_layer = QuantLinearMatVec(
-            linear=module,
-            matrix_in_fmt=matrix_in_fmt,
-            matrix_out_fmt=matrix_out_fmt,
-            vector_out_fmt=vector_out_fmt,
-            component=component,
-            layer_name=name,
-            tracker=tracker,
-            noise_cfg=noise_cfg,
-        )
-
-        if tracker is not None:
-            tracker.register(
-                name=name,
-                component=component,
-                in_features=module.in_features,
-                out_features=module.out_features,
-            )
-
-        _set_module(model, name, quant_layer)
-        n_replaced += 1
-        if verbose:
-            print(
-                f"  QUANT {name}  [{component.value}]  "
-                f"in={module.in_features} out={module.out_features}"
-            )
-
-    print(
-        f"[patch_model_matvec] Replaced {n_replaced} nn.Linear layers "
-        f"(skipped {n_skipped}).  "
-        f"mat_in={matrix_in_fmt.value}  mat_out={matrix_out_fmt.value}  vec_out={vector_out_fmt.value}"
-    )
-    return model
-
 
 def unpatch_model(model: nn.Module) -> nn.Module:
     """
@@ -336,10 +273,10 @@ def set_noise_cfg(model: nn.Module, noise_cfg: Optional[RelNoiseConfig]) -> None
     Update the noise configuration on all patched Linear layers in-place.
 
     This enables changing noise injection at runtime (without re-patching), as long
-    as the model has already been patched with QuantLinear / QuantLinearMatVec.
+    as the model has already been patched with QuantLinear.
     """
     for _, module in model.named_modules():
-        if isinstance(module, (QuantLinear, QuantLinearMatVec)):
+        if isinstance(module, QuantLinear):
             module.noise_cfg = noise_cfg
 
 
@@ -357,7 +294,7 @@ def _iter_named_linear(model: nn.Module):
 def _iter_named_quant_linear(model: nn.Module):
     """Yield (full_dotted_name, module) for every QuantLinear in the tree."""
     for name, module in model.named_modules():
-        if isinstance(module, (QuantLinear, QuantLinearMatVec)):
+        if isinstance(module, QuantLinear):
             yield name, module
 
 
@@ -386,7 +323,7 @@ def count_layers(model: nn.Module) -> dict[str, int]:
     """
     counts: dict[str, int] = {c.value: 0 for c in Component}
     for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, QuantLinear, QuantLinearMatVec)):
+        if isinstance(module, (nn.Linear, QuantLinear)):
             comp = _infer_component(name)
             counts[comp.value] += 1
     return {k: v for k, v in counts.items() if v > 0}
@@ -399,7 +336,7 @@ def list_linear_layers(model: nn.Module) -> list[dict]:
     """
     rows = []
     for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, QuantLinear, QuantLinearMatVec)):
+        if isinstance(module, (nn.Linear, QuantLinear)):
             comp = _infer_component(name)
             rows.append({
                 "name":        name,

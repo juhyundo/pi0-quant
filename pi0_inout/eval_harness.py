@@ -49,7 +49,7 @@ import torch
 import torch.nn as nn
 
 from .quant_types import QuantFormat
-from .model_patcher import patch_model, patch_model_matvec, unpatch_model, count_layers
+from .model_patcher import patch_model, unpatch_model, count_layers
 from .stats_tracker import StatsTracker, StatsReport, Component
 from .rel_noise import RelNoiseConfig
 
@@ -78,28 +78,6 @@ class QuantConfig:
         if not self.label:
             self.label = f"in={self.input_fmt.value}_out={self.output_fmt.value}"
 
-
-@dataclass
-class MatVecQuantConfig:
-    """
-    Quantization config with separate matrix/vector IO formats.
-
-    Constraint:
-        vector_in_fmt == matrix_out_fmt (enforced by patch_model_matvec).
-    """
-    matrix_in_fmt: QuantFormat = QuantFormat.BFLOAT16
-    matrix_out_fmt: QuantFormat = QuantFormat.BFLOAT16
-    vector_out_fmt: QuantFormat = QuantFormat.BFLOAT16
-    noise_cfg: Optional[RelNoiseConfig] = None
-    skip_components: frozenset[Component] = field(default_factory=frozenset)
-    label: str = ""
-
-    def __post_init__(self):
-        if not self.label:
-            self.label = (
-                f"mat_in={self.matrix_in_fmt.value}_mat_out={self.matrix_out_fmt.value}"
-                f"_vec_out={self.vector_out_fmt.value}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -243,72 +221,6 @@ def run_quantization_eval(
         inference_time_s=elapsed,
     )
 
-
-def run_quantization_eval_matvec(
-    model: nn.Module,
-    observations: List[Any],
-    infer_fn: Callable[[nn.Module, Any], torch.Tensor],
-    config: MatVecQuantConfig,
-    reference_actions: Optional[List[torch.Tensor]] = None,
-    *,
-    rmse_threshold: float = 0.4,
-    max_deg_threshold: Optional[float] = 20.0,
-    verbose: bool = True,
-) -> dict:
-    """
-    Evaluate matrix/vector quantization + optional ULP noise injection.
-
-    Returns a dict containing action RMSE and whether thresholds are violated.
-    """
-    if reference_actions is None:
-        if verbose:
-            print(f"[eval-matvec] Collecting fp32 reference actions for {len(observations)} observations...")
-        reference_actions = _collect_actions(model, observations, infer_fn)
-
-    tracker = StatsTracker()
-    patch_model_matvec(
-        model=model,
-        matrix_in_fmt=config.matrix_in_fmt,
-        matrix_out_fmt=config.matrix_out_fmt,
-        vector_out_fmt=config.vector_out_fmt,
-        tracker=tracker,
-        noise_cfg=config.noise_cfg,
-        skip_components=set(config.skip_components),
-        verbose=False,
-    )
-
-    if verbose:
-        print(f"[eval-matvec] Running quantized inference [{config.label}]...")
-    quant_actions = []
-    t0 = time.perf_counter()
-    for obs in observations:
-        with torch.no_grad():
-            quant_actions.append(infer_fn(model, obs))
-    elapsed = time.perf_counter() - t0
-
-    action_rmse = _compute_action_rmse(reference_actions, quant_actions)
-
-    comp_rows = tracker.summary().component_rows
-    component_rmse = {row["component"]: row["mean_rmse"] for row in comp_rows}
-
-    unpatch_model(model)
-
-    violates_rmse = (not math.isnan(action_rmse)) and action_rmse >= rmse_threshold
-
-    return {
-        "config": config.label,
-        "matrix_in_fmt": config.matrix_in_fmt.value,
-        "matrix_out_fmt": config.matrix_out_fmt.value,
-        "vector_out_fmt": config.vector_out_fmt.value,
-        "noise_cfg": None if config.noise_cfg is None else {
-            "rel_err": config.noise_cfg.rel_err,
-        },
-        "action_rmse": action_rmse,
-        "violates_rmse": violates_rmse,
-        "component_rmse": component_rmse,
-        "n_observations": len(observations),
-        "inference_time_s": elapsed,
-    }
 
 
 # ---------------------------------------------------------------------------

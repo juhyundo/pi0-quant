@@ -77,7 +77,7 @@ import torch.nn as nn
 # ── pi0_inout imports (quantization layer) ────────────────────────────────────
 from pi0_inout.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS, set_fp8_mode
 from pi0_inout.model_patcher import (
-    patch_model, patch_model_matvec, list_linear_layers,
+    patch_model, list_linear_layers,
     QuantGroup, ALL_GROUPS,
     patch_attn_sdpa, unpatch_attn_sdpa,
 )
@@ -791,19 +791,6 @@ def parse_args() -> argparse.Namespace:
             "Example: --quantize-components transformer action_head"
         ),
     )
-
-    # Optional: matrix/vector separate formats (constraint: vec_in == mat_out)
-    p.add_argument("--use-matvec", action="store_true",
-                   help="Use matrix/vector IO formats for nn.Linear instead of simple input/output formats")
-    p.add_argument("--mat-in-fmt", default="bfloat16",
-                   choices=[f.value for f in QuantFormat],
-                   help="Matrix input format (activation+weight)")
-    p.add_argument("--mat-out-fmt", default="bfloat16",
-                   choices=[f.value for f in QuantFormat],
-                   help="Matrix output format (matmul output before bias add)")
-    p.add_argument("--vec-out-fmt", default="bfloat16",
-                   choices=[f.value for f in QuantFormat],
-                   help="Vector output format (final output after bias add)")
 
     # Optional: relative-error noise injection into matmul outputs
     p.add_argument("--rel-err", type=float, default=0.0,

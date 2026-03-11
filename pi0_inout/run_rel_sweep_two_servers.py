@@ -262,9 +262,6 @@ def _start_quantized_server(
             "quantized_port": quantized_port,
             "input_fmt": defaults.get("input_fmt"),
             "output_fmt": defaults.get("output_fmt"),
-            "mat_in_fmt": defaults.get("mat_in_fmt"),
-            "mat_out_fmt": defaults.get("mat_out_fmt"),
-            "vec_out_fmt": defaults.get("vec_out_fmt"),
         },
     )
     argv = shlex.split(cmd_str)
@@ -273,21 +270,11 @@ def _start_quantized_server(
     _argv_set_kv(argv, "--rel-err", str(rel_err))
     _argv_set_kv(argv, "--port", str(quantized_port))
 
-    # If the template omits these, auto-fill from defaults (usually base server).
-    if defaults.get("use_matvec"):
-        if not _argv_has(argv, "--use-matvec"):
-            argv.append("--use-matvec")
-        if defaults.get("mat_in_fmt") and not _argv_has(argv, "--mat-in-fmt"):
-            _argv_set_kv(argv, "--mat-in-fmt", str(defaults["mat_in_fmt"]))
-        if defaults.get("mat_out_fmt") and not _argv_has(argv, "--mat-out-fmt"):
-            _argv_set_kv(argv, "--mat-out-fmt", str(defaults["mat_out_fmt"]))
-        if defaults.get("vec_out_fmt") and not _argv_has(argv, "--vec-out-fmt"):
-            _argv_set_kv(argv, "--vec-out-fmt", str(defaults["vec_out_fmt"]))
-    else:
-        if defaults.get("input_fmt") and not _argv_has(argv, "--input-fmt"):
-            _argv_set_kv(argv, "--input-fmt", str(defaults["input_fmt"]))
-        if defaults.get("output_fmt") and not _argv_has(argv, "--output-fmt"):
-            _argv_set_kv(argv, "--output-fmt", str(defaults["output_fmt"]))
+    # Auto-fill formats from defaults if not already in template.
+    if defaults.get("input_fmt") and not _argv_has(argv, "--input-fmt"):
+        _argv_set_kv(argv, "--input-fmt", str(defaults["input_fmt"]))
+    if defaults.get("output_fmt") and not _argv_has(argv, "--output-fmt"):
+        _argv_set_kv(argv, "--output-fmt", str(defaults["output_fmt"]))
 
     return subprocess.Popen(
         argv,
@@ -432,10 +419,6 @@ def main() -> None:
                 defaults = {
                     "input_fmt": base_q.get("input_fmt", "bfloat16"),
                     "output_fmt": base_q.get("output_fmt", "bfloat16"),
-                    "use_matvec": bool(base_q.get("use_matvec", False)),
-                    "mat_in_fmt": base_q.get("mat_in_fmt", "bfloat16"),
-                    "mat_out_fmt": base_q.get("mat_out_fmt", "bfloat16"),
-                    "vec_out_fmt": base_q.get("vec_out_fmt", "bfloat16"),
                 }
                 quantized_proc = _start_quantized_server(
                     args.quantized_server_cmd,

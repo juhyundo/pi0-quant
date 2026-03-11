@@ -29,7 +29,7 @@ Quick start:
 """
 
 from .quant_types   import QuantFormat, quant, TORCH_DTYPE, FORMAT_BITS, all_formats, sweep_pairs, set_fp8_mode, get_fp8_mode
-from .quant_linear  import QuantLinear, QuantLinearMatVec
+from .quant_linear  import QuantLinear
 from .model_patcher import (
     patch_model,
     unpatch_model,
