@@ -302,7 +302,7 @@ def main() -> None:
     p.add_argument("--quantized-host", default="127.0.0.1")
     p.add_argument("--quantized-port", type=int, default=8002)
 
-    p.add_argument("--n-obs", type=int, default=16)
+    p.add_argument("--n-obs", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--rmse-threshold", type=float, default=0.4)
     p.add_argument("--start-rel-err", type=float, default=1e-4,

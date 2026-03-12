@@ -51,6 +51,7 @@ from .ipt_mxu_model.fp_formats import OutputFmtSel
 _SUPPORTED_E4M3_NAMES = {
     "e4m3",
     "fp8_e4m3",
+    "float8_e4m3",
     "ocp_e4m3",
 }
 

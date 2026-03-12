@@ -677,6 +677,17 @@ def main() -> None:
     # ── Print quantization diagnostics ────────────────────────────────────
     print_quant_diagnostics(model, input_fmt, output_fmt)
 
+    # ── Log per-layer RTL usage ────────────────────────────────────────────
+    logger.info("=== QuantLinear layer RTL usage ===")
+    for name, module in model.named_modules():
+        if isinstance(module, QuantLinear):
+            layer = "rtl_linear" if module._use_rtl else "F.linear"
+            logger.info(
+                "  %-80s  layer=%-12s  in_fmt=%-14s  out_fmt=%s",
+                name, layer, module.input_fmt.value, module.output_fmt.value,
+            )
+    logger.info("=== end QuantLinear layer RTL usage ===")
+
     # ── Register stats dump on exit ───────────────────────────────────────
     def _dump_stats() -> None:
         unpatch_attn_sdpa(attn_handles)

@@ -675,7 +675,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--quantized-port", type=int, default=8002)
     p.add_argument("--gpu-base",  type=int, default=0, help="CUDA device for base server")
     p.add_argument("--gpu-quant", type=int, default=1, help="CUDA device for quantized server")
-    p.add_argument("--n-obs",      type=int,   default=16,  help="Observations per combo")
+    p.add_argument("--n-obs",      type=int,   default=1,  help="Observations per combo")
     p.add_argument("--seed",       type=int,   default=0)
 
     p.add_argument("--rel-err-step",   type=float, default=1e-4)
