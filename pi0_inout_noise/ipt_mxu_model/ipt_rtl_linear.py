@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Optional
 
@@ -7,6 +8,7 @@ from .fp_formats import AddendSel, OutputFmtSel
 from .params_and_requests import InnerProductTreeParams, ComputeReq, WeightLoadReq
 from .inner_product_trees_model import InnerProductTreesModel
 
+log = logging.getLogger(__name__)
 
 _E4M3_FLOAT_LUT = torch.zeros(256, dtype=torch.float32)
 for _i in range(256):
@@ -112,6 +114,10 @@ class IPTLinearRTLFunction:
         )
         self.out_fmt_sel = out_fmt_sel
         self._prepared_cache = None
+        log.info(
+            "IPTLinearRTLFunction init: vec_len=%d  num_lanes=%d  pipeline_depth=%d  out_fmt=%s",
+            vec_len, num_lanes, pipeline_depth, out_fmt_sel.name,
+        )
 
     def _tensor_cache_key(self, t: Optional[torch.Tensor]):
         if t is None:
@@ -134,11 +140,18 @@ class IPTLinearRTLFunction:
     ):
         key = (self._tensor_cache_key(w_q), self._tensor_cache_key(b_q))
         if self._prepared_cache is not None and self._prepared_cache["key"] == key:
+            log.debug("_prepare_static_operands: cache hit  in=%d  out=%d", in_features, out_features)
             return self._prepared_cache
 
         vec_len = self.p.vecLen
         num_lanes = self.p.numLanes
         num_k_tiles = (in_features + vec_len - 1) // vec_len
+        log.info(
+            "_prepare_static_operands: w%s  bias=%s  vec_len=%d  num_lanes=%d  k_tiles=%d  out_tiles=%d",
+            tuple(w_q.shape), "yes" if b_q is not None else "no",
+            vec_len, num_lanes, num_k_tiles,
+            math.ceil(out_features / num_lanes),
+        )
 
         w2 = w_q.float()
         b2 = b_q.float() if b_q is not None else None
@@ -201,6 +214,11 @@ class IPTLinearRTLFunction:
         vec_len = self.p.vecLen
         num_lanes = self.p.numLanes
         num_k_tiles = (in_features + vec_len - 1) // vec_len
+        log.info(
+            "__call__: x%s  w%s  bias=%s  batch=%d  in=%d  out=%d  k_tiles=%d  scale_exp=%d",
+            tuple(x_q.shape), tuple(w_q.shape), "yes" if b_q is not None else "no",
+            batch, in_features, out_features, num_k_tiles, scale_exp,
+        )
 
         x_e4m3 = float_to_e4m3_bytes(x2)
         x_e4m3_list = x_e4m3.cpu().tolist()
@@ -228,7 +246,12 @@ class IPTLinearRTLFunction:
 
         y_bits = torch.zeros(batch, out_features, dtype=torch.int32, device=device)
 
-        for out_base, lane_count, out_tile_weights in prepared_weight_tiles:
+        num_out_tiles = len(prepared_weight_tiles)
+        for tile_idx, (out_base, lane_count, out_tile_weights) in enumerate(prepared_weight_tiles):
+            log.debug(
+                "  out_tile %d/%d: out_base=%d  lane_count=%d",
+                tile_idx + 1, num_out_tiles, out_base, lane_count,
+            )
             dut = InnerProductTreesModel(self.p)
             psum_bits = [[0] * num_lanes for _ in range(batch)]
 
@@ -259,6 +282,10 @@ class IPTLinearRTLFunction:
                 else:
                     addend_sel = AddendSel.UsePsum
                     bias_list = zero_bias
+                log.debug(
+                    "    k_tile %d/%d: addend=%s",
+                    k_tile + 1, num_k_tiles, addend_sel.name,
+                )
 
                 for b_idx in range(batch):
                     req = ComputeReq(
@@ -279,4 +306,5 @@ class IPTLinearRTLFunction:
             y_bits[:, out_base:out_base + lane_count] = tile_bits
 
         y = decode_model_output_bits(y_bits, self.out_fmt_sel)
+        log.info("__call__: done  out%s  fmt=%s", tuple(y.shape), self.out_fmt_sel.name)
         return y.reshape(*original_shape, out_features)

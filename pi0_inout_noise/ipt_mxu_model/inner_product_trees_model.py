@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 
+import numpy as np
+
 from .fp_formats import AddendSel, E4M3ProdFmt, wrap_signed
 from .params_and_requests import ComputeReq, WeightLoadReq, StepResult, InnerProductTreeParams
 from .converters import (
@@ -11,6 +13,7 @@ from .converters import (
     aligned_int_to_bf16,
     output_conv_stage,
 )
+from ._numba_kernels import compute_lanes_batch, MUL_LUT
 
 
 _E4M3_PROD_BIAS = E4M3ProdFmt.bias
@@ -152,34 +155,22 @@ class InnerProductTreesModel:
         if len(req.scaleExp) != num_lanes:
             raise ValueError(f"scaleExp length must be {num_lanes}")
 
-        act_masked = [x & 0xFF for x in req.act]
+        act_arr  = np.array([x & 0xFF for x in req.act], dtype=np.uint8).reshape(1, vec_len)
+        bias_arr = np.array([x & 0xFF for x in req.bias], dtype=np.uint8)
+        psum_arr = np.array([x & 0xFFFF for x in req.psum], dtype=np.int32).reshape(1, num_lanes)
+        sexp_arr = np.array(req.scaleExp, dtype=np.int32)
+        wbuf0_np = np.array(self.wbuf0, dtype=np.uint8)
+        wbuf1_np = np.array(self.wbuf1, dtype=np.uint8)
 
-        buf_read_sel = self.buf_read_sel
-        addend_sel = req.addendSel
-        out_fmt_sel = req.outFmtSel
-
-        wbuf0 = self.wbuf0
-        wbuf1 = self.wbuf1
-        lanes = self.lanes
-        bias = req.bias
-        psum = req.psum
-        scale_exp = req.scaleExp
-
-        out = [0] * num_lanes
-        for lane_idx in range(num_lanes):
-            out[lane_idx] = lanes[lane_idx].compute_lane(
-                act=act_masked,
-                weight_buf0=wbuf0[lane_idx],
-                weight_buf1=wbuf1[lane_idx],
-                bias=bias[lane_idx] & 0xFF,
-                psum=psum[lane_idx] & 0xFFFF,
-                scale_exp=scale_exp[lane_idx],
-                buf_read_sel=buf_read_sel,
-                addend_sel=addend_sel,
-                out_fmt_sel=out_fmt_sel,
-            ) & 0xFFFF
-
-        return out
+        out = compute_lanes_batch(
+            act_arr, wbuf0_np, wbuf1_np,
+            bias_arr, psum_arr, sexp_arr,
+            self.buf_read_sel,
+            np.int32(req.addendSel.value),
+            np.int32(req.outFmtSel.value),
+            MUL_LUT,
+        )
+        return [int(x) for x in out[0]]
 
     def step(
         self,
