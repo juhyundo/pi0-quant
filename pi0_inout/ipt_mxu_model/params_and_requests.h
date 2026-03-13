@@ -1,9 +1,9 @@
 #ifndef PARAMS_AND_REQUESTS_H
 #define PARAMS_AND_REQUESTS_H
 
-/* atlas_params.h — C translation of params_and_requests.py
+/* params_and_requests.h — C translation of params_and_requests.py
  *
- * Depends on atlas_fp.h for AtlasFPType, AddendSel, OutputFmtSel, etc.
+ * Depends on fp_formats.h, converters.h for AtlasFPType, AddendSel, OutputFmtSel, etc.
  */
 
 #include <stdint.h>
@@ -161,4 +161,4 @@ typedef struct {
 } StepResult;
 
 
-#endif /* ATLAS_PARAMS_H */
+#endif /* PARAMS_AND_REQUESTS_H */

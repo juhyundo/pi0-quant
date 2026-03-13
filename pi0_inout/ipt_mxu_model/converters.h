@@ -1,10 +1,9 @@
 #ifndef CONVERTERS_H
 #define CONVERTERS_H
 
-/* atlas_acc.h — C translation of the Python accumulator / format-conversion
- * module.  Depends on atlas_fp.h (same translation unit set).
+/* converters.h — C translation of the Python accumulator / format-conversion
+ * module.  Depends on fp_formats.h (same translation unit set).
  *
- * Compile:  cc -O2 -c atlas_acc.c -lm
  */
 
 #include <stdint.h>
@@ -316,4 +315,4 @@ static inline uint32_t output_conv_stage(uint16_t bf16_bits,
     return (uint32_t)(bf16_scale_to_e4m3(sanitized, scale_exp) & 0xFF);
 }
 
-#endif /* ATLAS_ACC_H */
+#endif /* CONVERTERS_H */

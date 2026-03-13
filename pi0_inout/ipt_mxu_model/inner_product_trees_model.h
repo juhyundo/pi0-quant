@@ -1,10 +1,10 @@
 #ifndef INNER_PRODUCT_TREES_MODEL_H
 #define INNER_PRODUCT_TREES_MODEL_H
 
-/* atlas_model.h — C translation of the inner-product tree model
+/* inner_product_trees_model.h — C translation of the inner-product tree model
  *   (AnchorAccumulationTreeModel + InnerProductTreesModel)
  *
- * Depends on: atlas_fp.h, atlas_acc.h, atlas_params.h
+ * Depends on: fp_formats.h, converters.h, params_and_requests.h
  *
  * Memory ownership
  * ----------------
@@ -20,7 +20,7 @@
 #include <string.h>
 #include <assert.h>
 #include "fp_formats.h"
-#include "converters.H"
+#include "converters.h"
 #include "params_and_requests.h"
 
 
@@ -386,4 +386,4 @@ static inline StepResult ipt_model_step(IPTModel *m,
 }
 
 
-#endif /* ATLAS_MODEL_H */
+#endif

@@ -337,4 +337,4 @@ static inline uint16_t sanitize_bf16(uint16_t bits)
     return bits;
 }
 
-#endif /* ATLAS_FP_H */
+#endif /* FP_FORMATS_H */
