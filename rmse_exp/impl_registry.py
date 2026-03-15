@@ -19,17 +19,17 @@ IMPLS: dict[str, dict] = {
     "base": {
         "serve_quant":      _REPO_ROOT / "pi0_inout" / "serve_quant.py",
         "supports_rel_err": False,
-        "default_fp8_mode": "scaled",
+        "default_fp8_mode": "mx",
     },
     "ipt_c": {
         "serve_quant":      _REPO_ROOT / "pi0_inout_c" / "serve_quant.py",
         "supports_rel_err": True,
-        "default_fp8_mode": "scaled",
+        "default_fp8_mode": "mx",
     },
     "ipt_mxu": {
         "serve_quant":      _REPO_ROOT / "pi0_inout_ipt_mxu" / "serve_quant.py",
         "supports_rel_err": True,
-        "default_fp8_mode": "scaled",
+        "default_fp8_mode": "mx",
     },
     "ipt_numba": {
         "serve_quant":      _REPO_ROOT / "pi0_inout_ipt_mxu_numba" / "serve_quant.py",

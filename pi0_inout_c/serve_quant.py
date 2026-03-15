@@ -783,7 +783,7 @@ def parse_args() -> argparse.Namespace:
                    choices=[f.value for f in QuantFormat])
     p.add_argument("--output-fmt", default="bfloat16",
                    choices=[f.value for f in QuantFormat])
-    p.add_argument("--fp8-mode", default="scaled",
+    p.add_argument("--fp8-mode", default="mx",
                    choices=["scaled", "clamped", "mx"],
                    help="FP8 quantization mode: "
                         "'scaled' = per-tensor absmax (default), "
