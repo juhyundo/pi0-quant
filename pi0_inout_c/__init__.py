@@ -29,7 +29,7 @@ Quick start:
 """
 
 from .quant_types   import QuantFormat, quant, TORCH_DTYPE, FORMAT_BITS, all_formats, sweep_pairs, set_fp8_mode, get_fp8_mode
-from .quant_linear  import QuantLinear
+from .quant_linear_c import QuantLinearC
 from .model_patcher import (
     patch_model, unpatch_model, count_layers, list_linear_layers,
     QuantAttnContext,
@@ -58,7 +58,7 @@ __all__ = [
     "set_fp8_mode",
     "get_fp8_mode",
     # Core modules
-    "QuantLinear",
+    "QuantLinearC",
     # Patching
     "patch_model",
     "unpatch_model",

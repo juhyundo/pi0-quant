@@ -85,11 +85,17 @@ static inline int IPT_anchorHeadroom(const InnerProductTreeParams *p) {
     return _bit_length((unsigned)(p->vecLen + 1)) + 1;
 }
 
+/* IPT_INT_WIDTH_EXTRA: addend on top of _E4M3_PROD_SIG_WIDTH + anchorHeadroom.
+ * Default is 15.  Override at compile time with -DIPT_INT_WIDTH_EXTRA=<n>. */
+#ifndef IPT_INT_WIDTH_EXTRA
+#define IPT_INT_WIDTH_EXTRA 15
+#endif
+
 static inline int IPT_intWidth(const InnerProductTreeParams *p) {
     if (p->accumIntWidth > 0)
         return p->accumIntWidth;
-    /* E4M3ProdFmt.sigWidth = 8, anchorHeadroom, + 15 */
-    return _E4M3_PROD_SIG_WIDTH + IPT_anchorHeadroom(p) + 15;
+    /* E4M3ProdFmt.sigWidth = 8, anchorHeadroom, + IPT_INT_WIDTH_EXTRA */
+    return _E4M3_PROD_SIG_WIDTH + IPT_anchorHeadroom(p) + IPT_INT_WIDTH_EXTRA;
 }
 
 static inline int IPT_expWorkWidth(void) {

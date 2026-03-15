@@ -76,9 +76,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .quant_linear import QuantLinear
+from .quant_linear_c import QuantLinearC
 from .quant_types import QuantFormat, quant
 from .stats_tracker import Component, StatsTracker
+from .rel_noise import RelNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +162,9 @@ def patch_model(
     output_fmt: QuantFormat,
     tracker: Optional[StatsTracker] = None,
     active_groups: Optional[set[QuantGroup]] = None,
+    noise_cfg: Optional[RelNoiseConfig] = None,
     verbose: bool = False,
+    int_width_extra: int = 15,
 ) -> nn.Module:
     """
     Replace every nn.Linear in `model` with a QuantLinear in-place.
@@ -199,14 +202,16 @@ def patch_model(
                 print(f"  SKIP  {name}  [{component.value}]")
             continue
 
-        # Build the QuantLinear replacement
-        quant_layer = QuantLinear(
+        # Build the QuantLinearC replacement
+        quant_layer = QuantLinearC(
             linear=module,
             input_fmt=input_fmt,
             output_fmt=output_fmt,
             component=component,
             layer_name=name,
             tracker=tracker,
+            noise_cfg=noise_cfg,
+            int_width_extra=int_width_extra,
         )
 
         # Pre-register with tracker so summary() works even if some layers
@@ -277,7 +282,7 @@ def _iter_named_linear(model: nn.Module):
 def _iter_named_quant_linear(model: nn.Module):
     """Yield (full_dotted_name, module) for every QuantLinear in the tree."""
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             yield name, module
 
 
@@ -306,7 +311,7 @@ def count_layers(model: nn.Module) -> dict[str, int]:
     """
     counts: dict[str, int] = {c.value: 0 for c in Component}
     for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, QuantLinear)):
+        if isinstance(module, (nn.Linear, QuantLinearC)):
             comp = _infer_component(name)
             counts[comp.value] += 1
     return {k: v for k, v in counts.items() if v > 0}
@@ -319,7 +324,7 @@ def list_linear_layers(model: nn.Module) -> list[dict]:
     """
     rows = []
     for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, QuantLinear)):
+        if isinstance(module, (nn.Linear, QuantLinearC)):
             comp = _infer_component(name)
             rows.append({
                 "name":        name,

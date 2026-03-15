@@ -25,4 +25,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["pi0_inout*"]
+include = ["pi0_inout*", "rmse_exp*"]

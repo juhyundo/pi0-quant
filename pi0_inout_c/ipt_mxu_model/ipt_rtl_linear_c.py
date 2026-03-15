@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import logging
 import os
 import shutil
 import subprocess
@@ -37,6 +38,8 @@ from typing import Optional
 import torch
 
 from .fp_formats import OutputFmtSel
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # C shim source
@@ -97,30 +100,31 @@ void shim_ipt_linear_call(
 )
 
 # ---------------------------------------------------------------------------
-# Module-level singleton state
+# Module-level cache: keyed by int_width_extra so each value gets its own .so
 # ---------------------------------------------------------------------------
 
-_lib: Optional[ctypes.CDLL] = None
-_build_dir: Optional[str] = None
+# dict[int_width_extra -> ctypes.CDLL]
+_libs: dict[int, ctypes.CDLL] = {}
+# dict[int_width_extra -> build_dir_path]
+_build_dirs: dict[int, str] = {}
 
 
 def _cleanup() -> None:
-    global _lib, _build_dir
-    _lib = None
-    if _build_dir and os.path.isdir(_build_dir):
-        shutil.rmtree(_build_dir, ignore_errors=True)
-    _build_dir = None
+    global _libs, _build_dirs
+    _libs.clear()
+    for d in _build_dirs.values():
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    _build_dirs.clear()
 
 
 atexit.register(_cleanup)
 
 
-def _get_lib() -> ctypes.CDLL:
-    """Return the cached ctypes handle, compiling on first call."""
-    global _lib, _build_dir
-
-    if _lib is not None:
-        return _lib
+def _get_lib(int_width_extra: int = 15) -> ctypes.CDLL:
+    """Return the cached ctypes handle for the given int_width_extra, compiling on first call."""
+    if int_width_extra in _libs:
+        return _libs[int_width_extra]
 
     # Default: the ipt_mxu_model/ directory where the .h files live
     # alongside this .py file.
@@ -129,9 +133,9 @@ def _get_lib() -> ctypes.CDLL:
         os.path.dirname(os.path.abspath(__file__)),
     )
 
-    _build_dir = tempfile.mkdtemp(prefix="ipt_linear_c_")
-    shim_c = os.path.join(_build_dir, "ipt_linear_shim.c")
-    shim_so = os.path.join(_build_dir, "libipt_linear.so")
+    build_dir = tempfile.mkdtemp(prefix=f"ipt_linear_c_extra{int_width_extra}_")
+    shim_c = os.path.join(build_dir, "ipt_linear_shim.c")
+    shim_so = os.path.join(build_dir, "libipt_linear.so")
 
     with open(shim_c, "w") as fh:
         fh.write(_SHIM_C)
@@ -144,6 +148,7 @@ def _get_lib() -> ctypes.CDLL:
         "-shared",
         "-fPIC",
         f"-I{header_dir}",
+        f"-DIPT_INT_WIDTH_EXTRA={int_width_extra}",
         "-o",
         shim_so,
         shim_c,
@@ -151,10 +156,11 @@ def _get_lib() -> ctypes.CDLL:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        _cleanup()
+        shutil.rmtree(build_dir, ignore_errors=True)
         raise RuntimeError(
             "ipt_rtl_linear_c: failed to compile C shim.\n"
             f"  IPT_HEADER_DIR = {header_dir!r}\n"
+            f"  IPT_INT_WIDTH_EXTRA = {int_width_extra}\n"
             f"  Command: {' '.join(cmd)}\n"
             f"  stderr:\n{result.stderr}"
         )
@@ -181,8 +187,9 @@ def _get_lib() -> ctypes.CDLL:
     ]
 
     lib.shim_init()
-    _lib = lib
-    return _lib
+    _libs[int_width_extra] = lib
+    _build_dirs[int_width_extra] = build_dir
+    return lib
 
 
 # ---------------------------------------------------------------------------
@@ -211,14 +218,16 @@ class CIPTLinearRTLFunction:
         num_lanes: int = 16,
         pipeline_depth: int = 1,
         out_fmt_sel: OutputFmtSel = OutputFmtSel.OutBF16,
+        int_width_extra: int = 15,
     ) -> None:
         self.vec_len = vec_len
         self.num_lanes = num_lanes
         self.pipeline_depth = pipeline_depth
         self.out_fmt_sel = out_fmt_sel
+        self.int_width_extra = int_width_extra
 
         # Trigger compilation now so errors surface at construction time.
-        _get_lib()
+        _get_lib(int_width_extra=int_width_extra)
 
     def _call_c(
         self,
@@ -229,7 +238,7 @@ class CIPTLinearRTLFunction:
     ) -> torch.Tensor:
         import numpy as np
 
-        lib = _get_lib()
+        lib = _get_lib(int_width_extra=self.int_width_extra)
         batch = x_e4m3.shape[0]
         in_features = x_e4m3.shape[1]
         out_features = w_e4m3.shape[0]
@@ -292,6 +301,15 @@ class CIPTLinearRTLFunction:
         """
         original_shape = x_q.shape[:-1]
         in_features = x_q.shape[-1]
+        out_features = w_q.shape[0]
+        batch = x_q.reshape(-1, in_features).shape[0]
+        num_k_tiles = (in_features + self.vec_len - 1) // self.vec_len
+
+        log.info(
+            "__call__: x%s  w%s  bias=%s  batch=%d  in=%d  out=%d  k_tiles=%d  scale_exp=%d",
+            tuple(x_q.shape), tuple(w_q.shape), "yes" if b_q is not None else "no",
+            batch, in_features, out_features, num_k_tiles, scale_exp,
+        )
 
         x2 = x_q.reshape(-1, in_features).float()
         w2 = w_q.float()
@@ -305,4 +323,6 @@ class CIPTLinearRTLFunction:
 
         y = self._call_c(x_e4m3, w_e4m3, b_e4m3, scale_exp)
 
-        return y.reshape(*original_shape, w_q.shape[0])
+        result = y.reshape(*original_shape, w_q.shape[0])
+        log.info("__call__: done  out%s  fmt=%s", tuple(result.shape), self.out_fmt_sel.name)
+        return result

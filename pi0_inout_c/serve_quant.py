@@ -66,7 +66,7 @@ for _p in [str(_PI0_INOUT.parent), str(_CLIENT_SRC), str(_OPENPI_SRC)]:
         sys.path.insert(0, _p)
 
 # ── Inject JAX stubs BEFORE any openpi import ────────────────────────────────
-from pi0_inout._jax_stubs import inject as _inject_jax_stubs   # noqa: E402
+from pi0_inout_c._jax_stubs import inject as _inject_jax_stubs   # noqa: E402
 _inject_jax_stubs()
 
 # ── Now it is safe to import the pytorch model ────────────────────────────────
@@ -74,15 +74,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# ── pi0_inout imports (quantization layer) ────────────────────────────────────
-from pi0_inout.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS, set_fp8_mode
-from pi0_inout.model_patcher import (
+# ── pi0_inout_c imports (C-backed quantization layer) ─────────────────────────
+from pi0_inout_c.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS, set_fp8_mode
+from pi0_inout_c.model_patcher import (
     patch_model, list_linear_layers,
     QuantGroup, ALL_GROUPS,
     patch_attn_sdpa, unpatch_attn_sdpa,
 )
-from pi0_inout.quant_linear import QuantLinear
-from pi0_inout.stats_tracker import StatsTracker
+from pi0_inout_c.quant_linear_c import QuantLinearC
+from pi0_inout_c.stats_tracker import StatsTracker
+from pi0_inout_c.rel_noise import RelNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +301,7 @@ def print_quant_diagnostics(
     sample_layer = None
 
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             n_quant += 1
             n_params = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
             quant_params += n_params
@@ -324,7 +325,7 @@ def print_quant_diagnostics(
     print("    " + "-" * 110)
     count = 0
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             print(f"    {name:<60s}  {str(module.weight.dtype):<12s}  "
                   f"{module.input_fmt.value:<12s} {module.output_fmt.value}")
             count += 1
@@ -344,7 +345,7 @@ def print_quant_diagnostics(
     # Hypothetical memory if weights were ACTUALLY stored in input_fmt
     hypothetical_bytes = 0
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             n = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
             hypothetical_bytes += n * (input_bits // 8)
         elif type(module) is nn.Linear:
@@ -353,7 +354,7 @@ def print_quant_diagnostics(
     # Add non-linear params at their actual size
     linear_param_ids = set()
     for name, module in model.named_modules():
-        if isinstance(module, (QuantLinear, nn.Linear)):
+        if isinstance(module, (QuantLinearC, nn.Linear)):
             for p in module.parameters():
                 linear_param_ids.add(id(p))
     for p in model.parameters():
@@ -638,6 +639,11 @@ def main() -> None:
 
     active_groups = {QuantGroup(g) for g in args.quantize_components}
 
+    noise_cfg = None
+    if args.rel_err and args.rel_err > 0.0:
+        noise_cfg = RelNoiseConfig(rel_err=args.rel_err)
+        logger.info(f"Relative-error noise: rel_err={args.rel_err:.4e}")
+
     tracker = StatsTracker()
     patch_model(
         model=model,
@@ -645,7 +651,9 @@ def main() -> None:
         output_fmt=output_fmt,
         tracker=tracker,
         active_groups=active_groups,
+        noise_cfg=noise_cfg,
         verbose=False,
+        int_width_extra=args.int_width_extra,
     )
     attn_handles = patch_attn_sdpa(
         model=model,
@@ -658,6 +666,17 @@ def main() -> None:
         f"Model patched: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}  "
         f"components={args.quantize_components}"
     )
+
+    # ── Log per-layer backend (C RTL vs F.linear fallback) ────────────────
+    logger.info("=== QuantLinearC layer backend usage ===")
+    for name, module in model.named_modules():
+        if isinstance(module, QuantLinearC):
+            backend = "C_RTL" if module._use_rtl else "F.linear"
+            logger.info(
+                "  %-80s  backend=%-8s  in_fmt=%-14s  out_fmt=%s",
+                name, backend, module.input_fmt.value, module.output_fmt.value,
+            )
+    logger.info("=== end QuantLinearC layer backend usage ===")
 
     # ── Print quantization diagnostics ────────────────────────────────────
     print_quant_diagnostics(model, input_fmt, output_fmt)
@@ -777,6 +796,14 @@ def parse_args() -> argparse.Namespace:
             "Example: --quantize-components transformer action_head"
         ),
     )
+
+    # Optional: relative-error noise injection into matmul outputs
+    p.add_argument("--rel-err", type=float, default=0.0,
+                   help="Inject +/- rel_err * |y| noise into each Linear matmul output (0 disables)")
+
+    # IPT_intWidth extra addend (default 15, sweep 0..15 to study RMSE impact)
+    p.add_argument("--int-width-extra", type=int, default=15,
+                   help="Addend in IPT_intWidth = E4M3ProdSigWidth + anchorHeadroom + INT_WIDTH_EXTRA (default 15)")
 
     # Output
     p.add_argument("--stats-output", default=None,

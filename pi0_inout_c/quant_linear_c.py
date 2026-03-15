@@ -47,11 +47,13 @@ from .quant_types import QuantFormat, quant
 from .stats_tracker import StatsTracker, Component
 from .ipt_mxu_model.ipt_rtl_linear_c import CIPTLinearRTLFunction
 from .ipt_mxu_model.fp_formats import OutputFmtSel
+from .rel_noise import RelNoiseConfig, inject_rel_noise
 
 
 _SUPPORTED_E4M3_NAMES = {
     "e4m3",
     "fp8_e4m3",
+    "float8_e4m3",
     "ocp_e4m3",
 }
 
@@ -88,11 +90,13 @@ class QuantLinearC(nn.Module):
         component: Component,
         layer_name: str,
         tracker: Optional[StatsTracker] = None,
+        noise_cfg: Optional[RelNoiseConfig] = None,
         *,
         vec_len: int = 32,
         num_lanes: int = 16,
         pipeline_depth: int = 1,
         scale_exp: int = 0,
+        int_width_extra: int = 15,
     ) -> None:
         super().__init__()
         self.weight = linear.weight
@@ -103,6 +107,7 @@ class QuantLinearC(nn.Module):
         self.component = component
         self.layer_name = layer_name
         self.tracker = tracker
+        self.noise_cfg = noise_cfg
 
         self.in_features = linear.in_features
         self.out_features = linear.out_features
@@ -111,39 +116,34 @@ class QuantLinearC(nn.Module):
         self.num_lanes = num_lanes
         self.pipeline_depth = pipeline_depth
         self.scale_exp = scale_exp
+        self.int_width_extra = int_width_extra
 
-        self._validate_rtl_formats()
-        self.out_fmt_sel = self._to_output_fmt_sel(output_fmt)
-
-        # Constructing CIPTLinearRTLFunction triggers the one-time gcc
-        # compilation (if not already done) and validates the headers are
-        # reachable.  Subsequent instances reuse the cached .so.
-        self.rtl_linear = CIPTLinearRTLFunction(
-            vec_len=vec_len,
-            num_lanes=num_lanes,
-            pipeline_depth=pipeline_depth,
-            out_fmt_sel=self.out_fmt_sel,
+        in_name = self._fmt_name(input_fmt)
+        out_name = self._fmt_name(output_fmt)
+        self._use_rtl = (
+            in_name in _SUPPORTED_E4M3_NAMES
+            and out_name in (_SUPPORTED_E4M3_NAMES | _SUPPORTED_BF16_NAMES)
         )
+
+        if self._use_rtl:
+            self.out_fmt_sel = self._to_output_fmt_sel(output_fmt)
+            # Constructing CIPTLinearRTLFunction triggers the one-time gcc
+            # compilation (if not already done) and validates the headers are
+            # reachable.  Subsequent instances reuse the cached .so.
+            self.rtl_linear = CIPTLinearRTLFunction(
+                vec_len=vec_len,
+                num_lanes=num_lanes,
+                pipeline_depth=pipeline_depth,
+                out_fmt_sel=self.out_fmt_sel,
+                int_width_extra=int_width_extra,
+            )
+        else:
+            self.out_fmt_sel = None
+            self.rtl_linear = None
 
     @staticmethod
     def _fmt_name(fmt: QuantFormat) -> str:
         return str(fmt.value).lower()
-
-    def _validate_rtl_formats(self) -> None:
-        in_name = self._fmt_name(self.input_fmt)
-        out_name = self._fmt_name(self.output_fmt)
-
-        if in_name not in _SUPPORTED_E4M3_NAMES:
-            raise ValueError(
-                "RTL QuantLinear only supports E4M3 input_fmt for now; "
-                f"got {self.input_fmt.value!r}."
-            )
-
-        if out_name not in (_SUPPORTED_E4M3_NAMES | _SUPPORTED_BF16_NAMES):
-            raise ValueError(
-                "RTL QuantLinear only supports BF16 or E4M3 output_fmt for now; "
-                f"got {self.output_fmt.value!r}."
-            )
 
     @staticmethod
     def _to_output_fmt_sel(fmt: QuantFormat) -> OutputFmtSel:
@@ -167,13 +167,20 @@ class QuantLinearC(nn.Module):
         w_q = quant(w_f32, self.input_fmt)
         b_q = quant(b_f32, self.input_fmt) if b_f32 is not None else None
 
-        # ── Accumulate using the C-accelerated RTL model ─────────────────────
-        y_accum = self.rtl_linear(
-            x_q,
-            w_q,
-            b_q,
-            scale_exp=self.scale_exp,
-        )
+        # ── Accumulate using C RTL model (or F.linear fallback) ─────────────
+        if self._use_rtl:
+            y_accum = self.rtl_linear(
+                x_q.cpu(),
+                w_q.cpu(),
+                b_q.cpu() if b_q is not None else None,
+                scale_exp=self.scale_exp,
+            ).to(x_f32.device)
+        else:
+            y_accum = F.linear(x_q, w_q, b_q)
+
+        # ── Optional relative-error noise injection ──────────────────────────
+        if self.noise_cfg is not None and self.noise_cfg.enabled():
+            y_accum = inject_rel_noise(y_accum, rel_err=self.noise_cfg.rel_err)
 
         # ── Write result to output memory in output_fmt ──────────────────────
         y_out = quant(y_accum, self.output_fmt)
@@ -195,7 +202,8 @@ class QuantLinearC(nn.Module):
         return (
             f"in={self.in_features}, out={self.out_features}, "
             f"input_fmt={self.input_fmt.value}, output_fmt={self.output_fmt.value}, "
-            f"component={self.component.value}, vec_len={self.vec_len}, "
-            f"num_lanes={self.num_lanes}, pipeline_depth={self.pipeline_depth}, "
-            f"scale_exp={self.scale_exp}"
+            f"component={self.component.value}, rtl={self._use_rtl}, "
+            f"vec_len={self.vec_len}, num_lanes={self.num_lanes}, "
+            f"pipeline_depth={self.pipeline_depth}, scale_exp={self.scale_exp}, "
+            f"int_width_extra={self.int_width_extra}"
         )
