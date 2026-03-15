@@ -136,6 +136,8 @@ class QuantLinearC(nn.Module):
                 pipeline_depth=pipeline_depth,
                 out_fmt_sel=self.out_fmt_sel,
                 int_width_extra=int_width_extra,
+                layer_name=layer_name,
+                component=component.value,
             )
             # Pre-quantize and cache weights on CPU — weights are static at
             # inference time so there is no need to re-quantize every forward.

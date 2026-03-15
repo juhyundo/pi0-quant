@@ -221,12 +221,18 @@ class CIPTLinearRTLFunction:
         pipeline_depth: int = 1,
         out_fmt_sel: OutputFmtSel = OutputFmtSel.OutBF16,
         int_width_extra: int = 15,
+        layer_name: str = "",
+        component: str = "",
     ) -> None:
         self.vec_len = vec_len
         self.num_lanes = num_lanes
         self.pipeline_depth = pipeline_depth
         self.out_fmt_sel = out_fmt_sel
         self.int_width_extra = int_width_extra
+        # Shorten to last 4 dotted parts for compact log lines
+        parts = layer_name.split(".")
+        self.layer_tag = ".".join(parts[-4:]) if len(parts) > 4 else layer_name
+        self.component = component
 
         # Trigger compilation now so errors surface at construction time.
         _get_lib(int_width_extra=int_width_extra)
@@ -237,7 +243,8 @@ class CIPTLinearRTLFunction:
         w_e4m3: torch.Tensor,
         b_e4m3: Optional[torch.Tensor],
         scale_exp: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict]:
+        import time
         import numpy as np
 
         lib = _get_lib(int_width_extra=self.int_width_extra)
@@ -245,21 +252,21 @@ class CIPTLinearRTLFunction:
         in_features = x_e4m3.shape[1]
         out_features = w_e4m3.shape[0]
 
+        t0 = time.perf_counter()
         x_np = x_e4m3.cpu().contiguous().numpy()
         w_np = w_e4m3.cpu().contiguous().numpy()
-
         x_ptr = x_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         w_ptr = w_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
-
         if b_e4m3 is not None:
             b_np = b_e4m3.cpu().contiguous().numpy()
             b_ptr = b_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         else:
             b_ptr = ctypes.cast(None, ctypes.POINTER(ctypes.c_uint8))
-
         out_np = np.zeros(batch * out_features, dtype=np.uint16)
         out_ptr = out_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16))
+        t_setup = time.perf_counter() - t0
 
+        t1 = time.perf_counter()
         lib.shim_ipt_linear_call(
             ctypes.c_int(self.num_lanes),
             ctypes.c_int(self.vec_len),
@@ -274,12 +281,15 @@ class CIPTLinearRTLFunction:
             ctypes.c_int(int(self.out_fmt_sel.value)),
             out_ptr,
         )
+        t_rtl = time.perf_counter() - t1
 
+        t2 = time.perf_counter()
         bits = torch.from_numpy(out_np).to(torch.int32).reshape(batch, out_features)
-
         from .ipt_rtl_linear import decode_model_output_bits
+        result = decode_model_output_bits(bits, self.out_fmt_sel)
+        t_decode = time.perf_counter() - t2
 
-        return decode_model_output_bits(bits, self.out_fmt_sel)
+        return result, {"setup": t_setup, "rtl": t_rtl, "decode": t_decode}
 
     def __call__(
         self,
@@ -301,30 +311,43 @@ class CIPTLinearRTLFunction:
         float32 tensor with the same leading dimensions as x_q and a final
         dimension of out_features.
         """
+        import time
+
         original_shape = x_q.shape[:-1]
         in_features = x_q.shape[-1]
         out_features = w_q.shape[0]
         batch = x_q.reshape(-1, in_features).shape[0]
         num_k_tiles = (in_features + self.vec_len - 1) // self.vec_len
+        tag = f"[{self.component}] {self.layer_tag}" if self.component else self.layer_tag
 
         log.info(
-            "__call__: x%s  w%s  bias=%s  batch=%d  in=%d  out=%d  k_tiles=%d  scale_exp=%d",
-            tuple(x_q.shape), tuple(w_q.shape), "yes" if b_q is not None else "no",
+            "__call__: %s  w(%d,%d)  batch=%d  in=%d  out=%d  k_tiles=%d  scale_exp=%d",
+            tag, out_features, in_features,
             batch, in_features, out_features, num_k_tiles, scale_exp,
         )
 
+        t0 = time.perf_counter()
         x2 = x_q.reshape(-1, in_features).float()
         w2 = w_q.float()
         b2 = b_q.float() if b_q is not None else None
-
         from .ipt_rtl_linear import float_to_e4m3_bytes
-
+        t_x_e4m3 = time.perf_counter()
         x_e4m3 = float_to_e4m3_bytes(x2)
+        t_x_e4m3 = time.perf_counter() - t_x_e4m3
+        t_w_e4m3 = time.perf_counter()
         w_e4m3 = float_to_e4m3_bytes(w2)
+        t_w_e4m3 = time.perf_counter() - t_w_e4m3
         b_e4m3 = float_to_e4m3_bytes(b2) if b2 is not None else None
 
-        y = self._call_c(x_e4m3, w_e4m3, b_e4m3, scale_exp)
+        y, subtimes = self._call_c(x_e4m3, w_e4m3, b_e4m3, scale_exp)
+        elapsed = time.perf_counter() - t0
 
         result = y.reshape(*original_shape, w_q.shape[0])
-        log.info("__call__: done  out%s  fmt=%s", tuple(result.shape), self.out_fmt_sel.name)
+        log.info(
+            "__call__: done  %s  elapsed=%.3fs  w(%d,%d)  batch=%d  fmt=%s  "
+            "[x_e4m3=%.3fs  w_e4m3=%.3fs  np_setup=%.3fs  rtl=%.3fs  decode=%.3fs]",
+            tag, elapsed, out_features, in_features, batch, self.out_fmt_sel.name,
+            t_x_e4m3, t_w_e4m3,
+            subtimes["setup"], subtimes["rtl"], subtimes["decode"],
+        )
         return result
