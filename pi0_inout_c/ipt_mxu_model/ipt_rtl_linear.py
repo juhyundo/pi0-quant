@@ -3,9 +3,9 @@ from typing import Optional
 
 import torch
 
-from fp_formats import AddendSel, OutputFmtSel
-from params_and_requests import InnerProductTreeParams, ComputeReq, WeightLoadReq
-from inner_product_trees_model import InnerProductTreesModel
+from .fp_formats import AddendSel, OutputFmtSel
+from .params_and_requests import InnerProductTreeParams, ComputeReq, WeightLoadReq
+from .inner_product_trees_model import InnerProductTreesModel
 
 
 _E4M3_FLOAT_LUT = torch.zeros(256, dtype=torch.float32)

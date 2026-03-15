@@ -601,6 +601,7 @@ def main() -> None:
         force=True,
     )
     args = parse_args()
+    torch.manual_seed(args.seed)
 
     # Propagate openpi dir to stubs (in case it was set via CLI)
     if args.openpi_dir:
@@ -804,6 +805,9 @@ def parse_args() -> argparse.Namespace:
     # IPT_intWidth extra addend (default 15, sweep 0..15 to study RMSE impact)
     p.add_argument("--int-width-extra", type=int, default=15,
                    help="Addend in IPT_intWidth = E4M3ProdSigWidth + anchorHeadroom + INT_WIDTH_EXTRA (default 15)")
+
+    p.add_argument("--seed", type=int, default=0,
+                   help="Seed for torch RNG (makes rel-err noise deterministic)")
 
     # Output
     p.add_argument("--stats-output", default=None,

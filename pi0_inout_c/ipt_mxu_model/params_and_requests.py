@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fp_formats import E4M3, BF16, E4M3ProdFmt, AtlasFPType, AddendSel, OutputFmtSel
+from .fp_formats import E4M3, BF16, E4M3ProdFmt, AtlasFPType, AddendSel, OutputFmtSel
 
 
 _PIPELINE_DEPTH_TO_CUTS = {

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 
-from fp_formats import AddendSel, E4M3ProdFmt, wrap_signed
-from params_and_requests import ComputeReq, WeightLoadReq, StepResult, InnerProductTreeParams
-from converters import (
+from .fp_formats import AddendSel, E4M3ProdFmt, wrap_signed
+from .params_and_requests import ComputeReq, WeightLoadReq, StepResult, InnerProductTreeParams
+from .converters import (
     e4m3_mul_to_prod,
     e4m3_prod_to_aligned_int,
     ieee_to_aligned_int,

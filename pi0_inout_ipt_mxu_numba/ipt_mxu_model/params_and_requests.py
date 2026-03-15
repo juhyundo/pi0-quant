@@ -59,7 +59,7 @@ class InnerProductTreeParams:
         accum_int_width = self.accumIntWidth
         if accum_int_width > 0:
             return accum_int_width
-        return E4M3ProdFmt.sigWidth + self.anchorHeadroom + 0
+        return E4M3ProdFmt.sigWidth + self.anchorHeadroom + 15
 
     @property
     def expWorkWidth(self) -> int:

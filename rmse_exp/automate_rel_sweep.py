@@ -223,6 +223,7 @@ def _build_quant_server_template(
     openpi_dir: Optional[str],
     input_fmt: str,
     output_fmt: str,
+    seed: int,
 ) -> str:
     """
     Build the --quantized-server-cmd template for run_rel_sweep_two_servers.py.
@@ -238,6 +239,7 @@ def _build_quant_server_template(
         "--output-fmt",     output_fmt,
         "--fp8-mode",       fp8_mode,
         "--rel-err",        "{rel_err}",
+        "--seed",           str(seed),
     ]
     if openpi_dir:
         parts += ["--openpi-dir", openpi_dir]
@@ -280,6 +282,7 @@ def _run_combo_sweep(
         openpi_dir=openpi_dir,
         input_fmt=input_fmt,
         output_fmt=output_fmt,
+        seed=seed,
     )
 
     sweep_script = _THIS_DIR / "run_rel_sweep_two_servers.py"

@@ -145,6 +145,7 @@ def _get_lib(int_width_extra: int = 15) -> ctypes.CDLL:
         "-O2",
         "-Wall",
         "-Wno-unused-function",
+        "-fopenmp",
         "-shared",
         "-fPIC",
         f"-I{header_dir}",
@@ -153,6 +154,7 @@ def _get_lib(int_width_extra: int = 15) -> ctypes.CDLL:
         shim_so,
         shim_c,
         "-lm",
+        "-lgomp",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:

@@ -608,6 +608,7 @@ def main() -> None:
         force=True,
     )
     args = parse_args()
+    torch.manual_seed(args.seed)
 
     # Propagate openpi dir to stubs (in case it was set via CLI)
     if args.openpi_dir:
@@ -806,6 +807,10 @@ def parse_args() -> argparse.Namespace:
     # Optional: relative-error noise injection into matmul outputs
     p.add_argument("--rel-err", type=float, default=0.0,
                    help="Inject +/- rel_err * |y| noise into each Linear matmul output (0 disables)")
+
+    # Reproducibility
+    p.add_argument("--seed", type=int, default=0,
+                   help="Seed for torch RNG (makes rel-err noise deterministic)")
 
     # Output
     p.add_argument("--stats-output", default=None,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from fp_formats import (
+from .fp_formats import (
     BF16,
     E4M3ProdFmt,
     E4M3_MAX_NEG,

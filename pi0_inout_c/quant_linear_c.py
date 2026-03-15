@@ -137,9 +137,18 @@ class QuantLinearC(nn.Module):
                 out_fmt_sel=self.out_fmt_sel,
                 int_width_extra=int_width_extra,
             )
+            # Pre-quantize and cache weights on CPU — weights are static at
+            # inference time so there is no need to re-quantize every forward.
+            self._w_q_cpu = quant(linear.weight.cpu().float(), input_fmt)
+            self._b_q_cpu = (
+                quant(linear.bias.float(), input_fmt).cpu()
+                if linear.bias is not None else None
+            )
         else:
             self.out_fmt_sel = None
             self.rtl_linear = None
+            self._w_q_cpu = None
+            self._b_q_cpu = None
 
     @staticmethod
     def _fmt_name(fmt: QuantFormat) -> str:
@@ -164,15 +173,21 @@ class QuantLinearC(nn.Module):
 
         # ── Load all inputs from memory in input_fmt ─────────────────────────
         x_q = quant(x_f32, self.input_fmt)
-        w_q = quant(w_f32, self.input_fmt)
-        b_q = quant(b_f32, self.input_fmt) if b_f32 is not None else None
+        # w_q and b_q are pre-quantized at init for the RTL path; fall back to
+        # on-the-fly quantization only for the F.linear path.
+        if self._use_rtl:
+            w_q = self._w_q_cpu
+            b_q = self._b_q_cpu
+        else:
+            w_q = quant(w_f32, self.input_fmt)
+            b_q = quant(b_f32, self.input_fmt) if b_f32 is not None else None
 
         # ── Accumulate using C RTL model (or F.linear fallback) ─────────────
         if self._use_rtl:
             y_accum = self.rtl_linear(
                 x_q.cpu(),
-                w_q.cpu(),
-                b_q.cpu() if b_q is not None else None,
+                w_q,
+                b_q,
                 scale_exp=self.scale_exp,
             ).to(x_f32.device)
         else:
