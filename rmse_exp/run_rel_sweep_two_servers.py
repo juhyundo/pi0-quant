@@ -20,11 +20,8 @@ import logging
 import math
 import os
 import shlex
-import signal
 import subprocess
 import sys
-import time
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Optional
@@ -40,40 +37,23 @@ for _p in [str(_REPO_ROOT), str(_OPENPI_CLIENT_SRC)]:
 
 from openpi_client import websocket_client_policy as _ws
 
+from rmse_exp.server_utils import (
+    _kill_listeners_on_port,
+    _open_step_log,
+    _random_observation_droid,
+    _stop_proc_tree,
+    _timestamp_tag,
+    _to_actions_tensor,
+    _wait_until_ready,
+    _with_fixed_pi0_noise,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _random_observation_droid(rng: np.random.Generator) -> dict:
-    return {
-        "observation/exterior_image_1_left": rng.integers(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image_left": rng.integers(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/joint_position": rng.random(7, dtype=np.float32),
-        "observation/gripper_position": rng.random(1, dtype=np.float32),
-        "prompt": "Grab the object",
-    }
-
-
-def _with_fixed_pi0_noise(
-    obs: dict,
-    *,
-    rng: np.random.Generator,
-    action_horizon: int,
-    action_dim: int,
-) -> dict:
-    out = dict(obs)
-    out["pi0_noise"] = rng.standard_normal((action_horizon, action_dim)).astype(np.float32)
-    return out
 
 
 @dataclass(frozen=True)
 class Metrics:
     rmse: float
-
-
-def _to_actions_tensor(resp: dict) -> torch.Tensor:
-    a = resp["actions"]
-    t = torch.from_numpy(np.asarray(a).copy()).float()
-    return t.reshape(-1)
 
 
 def _metrics(base: list[torch.Tensor], quantized: list[torch.Tensor]) -> Metrics:
@@ -82,20 +62,6 @@ def _metrics(base: list[torch.Tensor], quantized: list[torch.Tensor]) -> Metrics
     diff = (r - n).abs()
     rmse = math.sqrt(float(diff.pow(2).mean().item()))
     return Metrics(rmse=rmse)
-
-
-def _wait_until_ready(policy: _ws.WebsocketClientPolicy, obs: dict, *, timeout_s: float) -> None:
-    t0 = time.time()
-    last_err: Optional[BaseException] = None
-    while True:
-        try:
-            policy.infer(obs)
-            return
-        except BaseException as e:
-            last_err = e
-            if time.time() - t0 >= timeout_s:
-                raise RuntimeError(f"Server not ready after {timeout_s:.1f}s") from last_err
-            time.sleep(0.25)
 
 
 def _quant_cfg(policy: _ws.WebsocketClientPolicy) -> dict[str, Any]:
@@ -127,94 +93,6 @@ def _replace_placeholders(template: str, values: dict[str, object]) -> str:
     for k, v in values.items():
         out = out.replace("{" + k + "}", str(v))
     return out
-
-
-def _stop_proc_tree(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        proc.wait(timeout=15)
-
-
-def _pids_listening_on_port(port: int) -> set[int]:
-    def _listen_inodes_from(path: str) -> set[str]:
-        inodes: set[str] = set()
-        with open(path, "r", encoding="utf-8") as f:
-            next(f, None)
-            for line in f:
-                parts = line.split()
-                if len(parts) < 10:
-                    continue
-                local_address = parts[1]
-                st = parts[3]
-                inode = parts[9]
-                if st != "0A":
-                    continue
-                try:
-                    _ip_hex, port_hex = local_address.split(":")
-                    p = int(port_hex, 16)
-                except Exception:
-                    continue
-                if p == port:
-                    inodes.add(inode)
-        return inodes
-
-    inodes: set[str] = set()
-    with suppress(FileNotFoundError, PermissionError):
-        inodes |= _listen_inodes_from("/proc/net/tcp")
-    with suppress(FileNotFoundError, PermissionError):
-        inodes |= _listen_inodes_from("/proc/net/tcp6")
-    if not inodes:
-        return set()
-
-    pids: set[int] = set()
-    for pid_str in os.listdir("/proc"):
-        if not pid_str.isdigit():
-            continue
-        pid = int(pid_str)
-        fd_dir = f"/proc/{pid_str}/fd"
-        try:
-            fds = os.listdir(fd_dir)
-        except (FileNotFoundError, PermissionError):
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(os.path.join(fd_dir, fd))
-            except (FileNotFoundError, PermissionError, OSError):
-                continue
-            if target.startswith("socket:[") and target.endswith("]"):
-                inode = target[len("socket:["):-1]
-                if inode in inodes:
-                    pids.add(pid)
-                    break
-    return pids
-
-
-def _kill_listeners_on_port(port: int, *, timeout_s: float = 10.0) -> None:
-    pids = _pids_listening_on_port(port)
-    if not pids:
-        return
-    for pid in pids:
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGTERM)
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        if not _pids_listening_on_port(port):
-            return
-        time.sleep(0.1)
-    for pid in _pids_listening_on_port(port):
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGKILL)
 
 
 def _start_quantized_server(
@@ -251,16 +129,6 @@ def _start_quantized_server(
         text=True,
         preexec_fn=os.setsid,
     )
-
-
-def _timestamp_tag() -> str:
-    return time.strftime("%Y%m%d-%H%M%S", time.localtime())
-
-
-def _open_step_log(*, log_dir: Path, tag: str) -> IO[str]:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    path = log_dir / f"{tag}.log"
-    return path.open("w", encoding="utf-8")
 
 
 def main() -> None:

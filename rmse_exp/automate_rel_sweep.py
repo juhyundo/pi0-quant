@@ -37,14 +37,17 @@ import json
 import logging
 import os
 import re
-import signal
-import socket
 import subprocess
 import sys
 import time
-from contextlib import suppress
 from pathlib import Path
 from typing import IO, Optional
+
+from rmse_exp.server_utils import (
+    _kill_listeners_on_port,
+    _stop_proc_tree,
+    _wait_for_port,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,91 +80,6 @@ def format_combos(only: list[tuple[str, str]] | None = None) -> list[tuple[str, 
 
 def combo_label(input_fmt: str, output_fmt: str) -> str:
     return f"{input_fmt}__{output_fmt}"
-
-
-# ---------------------------------------------------------------------------
-# Port utilities
-# ---------------------------------------------------------------------------
-
-def _wait_for_port(port: int, *, timeout_s: float = 120.0, interval_s: float = 1.0) -> bool:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-                return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(interval_s)
-    return False
-
-
-def _pids_listening_on_port(port: int) -> set[int]:
-    def _inodes(path: str) -> set[str]:
-        inodes: set[str] = set()
-        with suppress(FileNotFoundError, PermissionError):
-            with open(path, "r") as f:
-                next(f, None)
-                for line in f:
-                    parts = line.split()
-                    if len(parts) < 10 or parts[3] != "0A":
-                        continue
-                    with suppress(Exception):
-                        if int(parts[1].split(":")[1], 16) == port:
-                            inodes.add(parts[9])
-        return inodes
-
-    inodes = _inodes("/proc/net/tcp") | _inodes("/proc/net/tcp6")
-    if not inodes:
-        return set()
-    pids: set[int] = set()
-    for pid_str in os.listdir("/proc"):
-        if not pid_str.isdigit():
-            continue
-        fd_dir = f"/proc/{pid_str}/fd"
-        with suppress(FileNotFoundError, PermissionError):
-            for fd in os.listdir(fd_dir):
-                with suppress(FileNotFoundError, PermissionError, OSError):
-                    target = os.readlink(os.path.join(fd_dir, fd))
-                    if target.startswith("socket:[") and target[8:-1] in inodes:
-                        pids.add(int(pid_str))
-                        break
-    return pids
-
-
-def _kill_listeners_on_port(port: int, *, timeout_s: float = 10.0) -> None:
-    pids = _pids_listening_on_port(port)
-    if not pids:
-        return
-    logger.info("Killing %d existing listener(s) on port %d: %s", len(pids), port, pids)
-    for pid in pids:
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGTERM)
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if not _pids_listening_on_port(port):
-            return
-        time.sleep(0.1)
-    for pid in _pids_listening_on_port(port):
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGKILL)
-
-
-# ---------------------------------------------------------------------------
-# Server lifecycle
-# ---------------------------------------------------------------------------
-
-def _stop_proc_tree(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        with suppress(ProcessLookupError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.wait(timeout=15)
 
 
 def _start_base_server(

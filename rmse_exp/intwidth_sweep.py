@@ -25,12 +25,8 @@ import argparse
 import logging
 import math
 import os
-import signal
-import socket
 import subprocess
 import sys
-import time
-from contextlib import suppress
 from pathlib import Path
 from typing import IO, Optional
 
@@ -46,141 +42,31 @@ for _p in [str(_REPO_ROOT), str(_CLIENT_SRC)]:
 
 from openpi_client import websocket_client_policy as _ws
 
+from rmse_exp.server_utils import (
+    _kill_listeners_on_port,
+    _open_step_log,
+    _random_observation_droid,
+    _stop_proc_tree,
+    _timestamp_tag,
+    _to_actions_tensor,
+    _wait_for_port,
+    _wait_until_ready,
+    _with_fixed_pi0_noise,
+)
+
 logger = logging.getLogger(__name__)
 
 _SERVE_SCRIPT = _REPO_ROOT / "pi0_inout_c" / "serve_quant.py"
 
 
 # ---------------------------------------------------------------------------
-# Observation helpers
+# RMSE
 # ---------------------------------------------------------------------------
-
-def _random_observation_droid(rng: np.random.Generator) -> dict:
-    return {
-        "observation/exterior_image_1_left": rng.integers(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image_left":      rng.integers(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/joint_position":        rng.random(7, dtype=np.float32),
-        "observation/gripper_position":      rng.random(1, dtype=np.float32),
-        "prompt": "Grab the object",
-    }
-
-
-def _with_fixed_pi0_noise(
-    obs: dict,
-    *,
-    rng: np.random.Generator,
-    action_horizon: int,
-    action_dim: int,
-) -> dict:
-    out = dict(obs)
-    out["pi0_noise"] = rng.standard_normal((action_horizon, action_dim)).astype(np.float32)
-    return out
-
-
-def _to_actions_tensor(resp: dict) -> torch.Tensor:
-    a = resp["actions"]
-    return torch.from_numpy(np.asarray(a).copy()).float().reshape(-1)
-
 
 def _rmse(base: list[torch.Tensor], quantized: list[torch.Tensor]) -> float:
     r = torch.cat(base)
     n = torch.cat(quantized)
     return math.sqrt(float((r - n).pow(2).mean().item()))
-
-
-# ---------------------------------------------------------------------------
-# Port / process helpers (mirrors automate_rel_sweep.py)
-# ---------------------------------------------------------------------------
-
-def _wait_for_port(port: int, *, timeout_s: float = 120.0, interval_s: float = 1.0) -> bool:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-                return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(interval_s)
-    return False
-
-
-def _wait_until_ready(
-    policy: _ws.WebsocketClientPolicy, obs: dict, *, timeout_s: float
-) -> None:
-    t0 = time.time()
-    last_err: Optional[BaseException] = None
-    while True:
-        try:
-            policy.infer(obs)
-            return
-        except BaseException as e:
-            last_err = e
-            if time.time() - t0 >= timeout_s:
-                raise RuntimeError(f"Server not ready after {timeout_s:.1f}s") from last_err
-            time.sleep(0.25)
-
-
-def _pids_listening_on_port(port: int) -> set[int]:
-    def _inodes(path: str) -> set[str]:
-        inodes: set[str] = set()
-        with suppress(FileNotFoundError, PermissionError):
-            with open(path, "r") as f:
-                next(f, None)
-                for line in f:
-                    parts = line.split()
-                    if len(parts) < 10 or parts[3] != "0A":
-                        continue
-                    with suppress(Exception):
-                        if int(parts[1].split(":")[1], 16) == port:
-                            inodes.add(parts[9])
-        return inodes
-
-    inodes = _inodes("/proc/net/tcp") | _inodes("/proc/net/tcp6")
-    if not inodes:
-        return set()
-    pids: set[int] = set()
-    for pid_str in os.listdir("/proc"):
-        if not pid_str.isdigit():
-            continue
-        fd_dir = f"/proc/{pid_str}/fd"
-        with suppress(FileNotFoundError, PermissionError):
-            for fd in os.listdir(fd_dir):
-                with suppress(FileNotFoundError, PermissionError, OSError):
-                    target = os.readlink(os.path.join(fd_dir, fd))
-                    if target.startswith("socket:[") and target[8:-1] in inodes:
-                        pids.add(int(pid_str))
-                        break
-    return pids
-
-
-def _kill_listeners_on_port(port: int, *, timeout_s: float = 10.0) -> None:
-    pids = _pids_listening_on_port(port)
-    if not pids:
-        return
-    logger.info("Killing %d existing listener(s) on port %d: %s", len(pids), port, pids)
-    for pid in pids:
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGTERM)
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if not _pids_listening_on_port(port):
-            return
-        time.sleep(0.1)
-    for pid in _pids_listening_on_port(port):
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGKILL)
-
-
-def _stop_proc_tree(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    with suppress(ProcessLookupError):
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        with suppress(ProcessLookupError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.wait(timeout=15)
 
 
 # ---------------------------------------------------------------------------
@@ -268,15 +154,6 @@ def _start_quantized_server(
 # Main
 # ---------------------------------------------------------------------------
 
-def _timestamp_tag() -> str:
-    return time.strftime("%Y%m%d-%H%M%S", time.localtime())
-
-
-def _open_step_log(*, log_dir: Path, tag: str) -> IO[str]:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return (log_dir / f"{tag}.log").open("w", encoding="utf-8")
-
-
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -308,12 +185,16 @@ def main() -> None:
     p.add_argument("--max-extra", type=int, default=15,
                    help="End of int_width_extra sweep inclusive (default: 15)")
 
-    p.add_argument("--n-obs", type=int, default=4)
+    p.add_argument("--n-obs", type=int, default=1)
     p.add_argument("--seed",  type=int, default=0)
-    p.add_argument("--use-fixed-pi0-noise", action="store_true")
+    p.add_argument("--no-fixed-pi0-noise", action="store_true",
+                   help="Disable fixed diffusion noise injection (not recommended: "
+                        "RMSE will include sampling variance)")
     p.add_argument("--ready-timeout-s", type=float, default=120.0)
     p.add_argument("--log-dir", default=str(_REPO_ROOT / "rmse_exp" / "logs"))
     args = p.parse_args()
+
+    use_fixed_pi0_noise = not args.no_fixed_pi0_noise
 
     python = args.python or sys.executable
     openpi_dir = args.openpi_dir or str(_REPO_ROOT / "openpi")
@@ -349,18 +230,19 @@ def main() -> None:
 
     base = _ws.WebsocketClientPolicy(host="127.0.0.1", port=args.base_port)
 
-    # Warm-up call to determine action shape
+    # Warm-up call to determine action shape and action_dim from metadata
     obs0 = _random_observation_droid(rng)
     _wait_until_ready(base, obs0, timeout_s=args.ready_timeout_s)
     warm = base.infer(obs0)
     action_horizon = np.asarray(warm["actions"]).shape[0]
-    action_dim = 32  # default; update if metadata available
+    base_md = base.get_server_metadata() or {}
+    action_dim = int(base_md.get("action_dim", 32))
 
     # Build fixed observations for the sweep
     observations: list[dict] = []
     for _ in range(args.n_obs):
         obs = _random_observation_droid(rng)
-        if args.use_fixed_pi0_noise:
+        if use_fixed_pi0_noise:
             obs = _with_fixed_pi0_noise(
                 obs, rng=rng, action_horizon=action_horizon, action_dim=action_dim
             )
@@ -377,7 +259,8 @@ def main() -> None:
     run_log.write(f"# n_obs={args.n_obs}  seed={args.seed}\n")
     run_log.write(f"# sweep: int_width_extra {args.min_extra}..{args.max_extra}\n")
     run_log.write(f"# input_fmt={args.input_fmt}  output_fmt={args.output_fmt}\n")
-    run_log.write(f"# gpu_base={args.gpu_base}  gpu_quant={args.gpu_quant}\n\n")
+    run_log.write(f"# gpu_base={args.gpu_base}  gpu_quant={args.gpu_quant}\n")
+    run_log.write(f"# use_fixed_pi0_noise={use_fixed_pi0_noise}  action_dim={action_dim}\n\n")
     run_log.flush()
 
     quantized_proc: Optional[subprocess.Popen] = None
