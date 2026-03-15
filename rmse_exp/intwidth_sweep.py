@@ -234,6 +234,7 @@ def _start_quantized_server(
     input_fmt: str,
     output_fmt: str,
     int_width_extra: int,
+    seed: int,
     openpi_dir: Optional[str],
     stdout: Optional[IO[str]] = None,
 ) -> subprocess.Popen:
@@ -246,6 +247,7 @@ def _start_quantized_server(
         "--input-fmt",        input_fmt,
         "--output-fmt",       output_fmt,
         "--int-width-extra",  str(int_width_extra),
+        "--seed",             str(seed),
     ]
     if openpi_dir:
         cmd += ["--openpi-dir", openpi_dir]
@@ -408,6 +410,7 @@ def main() -> None:
                 input_fmt=args.input_fmt,
                 output_fmt=args.output_fmt,
                 int_width_extra=extra,
+                seed=args.seed,
                 openpi_dir=openpi_dir,
                 stdout=quantized_log_fh,
             )
