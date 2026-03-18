@@ -345,9 +345,8 @@ class CIPTLinearRTLFunction:
         result = y.reshape(*original_shape, w_q.shape[0])
         log.info(
             "__call__: done  %s  elapsed=%.3fs  w(%d,%d)  batch=%d  fmt=%s  "
-            "[x_e4m3=%.3fs  w_e4m3=%.3fs  np_setup=%.3fs  rtl=%.3fs  decode=%.3fs]",
+            "[x_e4m3=%.3fs  w_e4m3=%.3fs  rtl=%.3fs]",
             tag, elapsed, out_features, in_features, batch, self.out_fmt_sel.name,
-            t_x_e4m3, t_w_e4m3,
-            subtimes["setup"], subtimes["rtl"], subtimes["decode"],
+            t_x_e4m3, t_w_e4m3, subtimes["rtl"],
         )
         return result

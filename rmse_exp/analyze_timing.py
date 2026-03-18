@@ -2,8 +2,10 @@
 analyze_timing.py
 -----------------
 Parse __call__: done lines from a CIPTLinearRTLFunction server log and produce:
-  1. timing_bars.png   — avg/min/max elapsed per (component, w_shape) group
-  2. timing_timeline.png — elapsed per call in sequence, colored by component
+  1. timing_bars.png        — avg/min/max elapsed per (component, w_shape) group
+  2. timing_timeline.png    — elapsed per call in sequence, colored by component
+  3. timing_breakdown.png   — stacked bar: avg x_e4m3/w_e4m3/rtl per group
+  4. timing_phases_pie.png  — total time in each sub-timing phase across all calls
 
 Usage:
     uv run python rmse_exp/analyze_timing.py <path/to/server.log>
@@ -31,6 +33,7 @@ import numpy as np
 
 # Format produced by ipt_rtl_linear_c.py:
 #   __call__: done  [vision] enc.0.mlp.fc1  elapsed=0.923s  w(1152,1152)  batch=256  fmt=OutBF16
+#   optional suffix: [x_e4m3=0.132s  w_e4m3=0.607s  rtl=0.133s]
 _DONE_RE = re.compile(
     r"__call__: done\s+"
     r"\[(?P<component>[^\]]+)\]\s+(?P<layer>[^\s]+)\s+"
@@ -38,6 +41,13 @@ _DONE_RE = re.compile(
     r"w\((?P<out>\d+),(?P<in_>\d+)\)\s+"
     r"batch=(?P<batch>\d+)"
 )
+
+# Sub-timing fields in the trailing [...] block
+_SUB_FIELDS = ["x_e4m3", "w_e4m3", "rtl"]
+_SUB_RE = {
+    f: re.compile(rf"{f}=(?P<val>[0-9.]+)s")
+    for f in _SUB_FIELDS
+}
 
 
 def parse_log(log_path: Path) -> list[dict]:
@@ -47,14 +57,18 @@ def parse_log(log_path: Path) -> list[dict]:
             m = _DONE_RE.search(line)
             if not m:
                 continue
-            records.append({
+            rec = {
                 "component": m.group("component"),
                 "layer":     m.group("layer"),
                 "elapsed":   float(m.group("elapsed")),
                 "w_shape":   (int(m.group("out")), int(m.group("in_"))),
                 "batch":     int(m.group("batch")),
                 "call_idx":  len(records),
-            })
+            }
+            for f, sub_re in _SUB_RE.items():
+                sm = sub_re.search(line)
+                rec[f] = float(sm.group("val")) if sm else None
+            records.append(rec)
     return records
 
 
@@ -125,7 +139,6 @@ def plot_bars(records: list[dict], out_path: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"  saved: {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +173,86 @@ def plot_timeline(records: list[dict], out_path: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"  saved: {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Sub-timing breakdown plots
+# ---------------------------------------------------------------------------
+
+# Colors for each sub-timing phase
+_PHASE_COLORS = {
+    "x_e4m3": "#4C72B0",  # blue   — quantize activation
+    "w_e4m3": "#DD8452",  # orange — quantize weight
+    "rtl":    "#55A868",  # green  — actual RTL compute
+}
+
+
+def plot_breakdown(records: list[dict], out_path: Path) -> None:
+    """Stacked bar: avg x_e4m3 / w_e4m3 / rtl per (component, w_shape)."""
+    # Only use records that have sub-timing data
+    sub_records = [r for r in records if r.get("x_e4m3") is not None]
+    if not sub_records:
+        return
+
+    # Group by (component, w_shape), compute per-phase mean
+    groups: dict[tuple, dict[str, list[float]]] = defaultdict(lambda: {f: [] for f in _SUB_FIELDS})
+    for r in sub_records:
+        key = (r["component"], r["w_shape"])
+        for f in _SUB_FIELDS:
+            if r[f] is not None:
+                groups[key][f].append(r[f])
+
+    # Sort by total mean elapsed descending
+    def _total(v): return sum(np.mean(v[f]) for f in _SUB_FIELDS if v[f])
+    sorted_groups = sorted(groups.items(), key=lambda kv: _total(kv[1]), reverse=True)
+
+    labels = [f"[{comp}]\n{shape[0]}×{shape[1]}" for (comp, shape), _ in sorted_groups]
+    means  = {f: [np.mean(v[f]) if v[f] else 0.0 for _, v in sorted_groups] for f in _SUB_FIELDS}
+
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(max(12, len(labels) * 0.7), 6))
+
+    bottoms = np.zeros(len(labels))
+    for f in _SUB_FIELDS:
+        ax.bar(x, means[f], bottom=bottoms, color=_PHASE_COLORS[f], label=f, alpha=0.9, zorder=3)
+        bottoms += np.array(means[f])
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Elapsed (s)")
+    ax.set_title("RTL sub-timing breakdown: avg per (component, weight shape)")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", linestyle="--", alpha=0.5, zorder=0)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_phases_pie(records: list[dict], out_path: Path) -> None:
+    """Pie chart of total time in each sub-timing phase across all calls."""
+    sub_records = [r for r in records if r.get("x_e4m3") is not None]
+    if not sub_records:
+        return
+
+    totals = {f: sum(r[f] for r in sub_records if r[f] is not None) for f in _SUB_FIELDS}
+    # Drop zero-time phases
+    totals = {f: v for f, v in totals.items() if v > 0}
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.pie(
+        list(totals.values()),
+        labels=list(totals.keys()),
+        colors=[_PHASE_COLORS[f] for f in totals],
+        autopct="%1.1f%%",
+        startangle=140,
+        pctdistance=0.8,
+    )
+    total_s = sum(totals.values())
+    ax.set_title(f"Total time by RTL phase  ({total_s:.1f}s across {len(sub_records)} calls)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +303,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stem = args.log.stem
-    plot_bars(records,     out_dir / f"{stem}_timing_bars.png")
-    plot_timeline(records, out_dir / f"{stem}_timing_timeline.png")
+    plot_bars(records,       out_dir / f"{stem}_timing_bars.png")
+    plot_timeline(records,   out_dir / f"{stem}_timing_timeline.png")
+    plot_breakdown(records,  out_dir / f"{stem}_timing_breakdown.png")
+    plot_phases_pie(records, out_dir / f"{stem}_timing_phases_pie.png")
 
 
 if __name__ == "__main__":
