@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "fp_formats.h"
 #include "converters.h"
@@ -66,39 +69,36 @@ static inline void ipt_linear_call(
     OutputFmtSel    out_fmt_sel,
     uint16_t       *out_bits)       /* [batch * out_features] */
 {
-    const int num_lanes = p->numLanes;
-    const int vec_len   = p->vecLen;
+    const int num_lanes   = p->numLanes;
+    const int vec_len     = p->vecLen;
     const int num_k_tiles = (in_features + vec_len - 1) / vec_len;
-
-    /* Scratch buffers for a single compute call */
-    uint8_t  *act_buf   = (uint8_t  *)calloc((size_t)vec_len,   1);
-    uint8_t  *bias_buf  = (uint8_t  *)calloc((size_t)num_lanes, 1);
-    uint16_t *psum_buf  = (uint16_t *)calloc((size_t)num_lanes, sizeof(uint16_t));
-    int      *sexp_buf  = (int      *)malloc((size_t)num_lanes  * sizeof(int));
-    uint16_t *lane_out  = (uint16_t *)malloc((size_t)num_lanes  * sizeof(uint16_t));
-    assert(act_buf && bias_buf && psum_buf && sexp_buf && lane_out);
-
-    for (int li = 0; li < num_lanes; li++)
-        sexp_buf[li] = scale_exp;
-
-    /* psum per batch row: uint16_t[batch * num_lanes] */
-    uint16_t *psum_all = (uint16_t *)calloc((size_t)(batch * num_lanes),
-                                             sizeof(uint16_t));
-    assert(psum_all);
+    const int num_out_tiles = (out_features + num_lanes - 1) / num_lanes;
 
     /* ------------------------------------------------------------------
-     * Outer loop: output tiles
+     * Outer loop: output tiles — each tile is fully independent.
+     * All scratch buffers are allocated inside the loop (thread-private).
+     * out_bits writes are to disjoint regions so no race condition.
      * ------------------------------------------------------------------ */
-    for (int out_base = 0; out_base < out_features; out_base += num_lanes)
+#pragma omp parallel for schedule(static)
+    for (int tile_idx = 0; tile_idx < num_out_tiles; tile_idx++)
     {
+        const int out_base   = tile_idx * num_lanes;
         int lane_count = out_features - out_base;
         if (lane_count > num_lanes) lane_count = num_lanes;
 
-        /* Reset per-batch psum to zero for this output tile */
-        memset(psum_all, 0, (size_t)(batch * num_lanes) * sizeof(uint16_t));
+        /* Thread-private scratch buffers */
+        uint8_t  *act_buf  = (uint8_t  *)calloc((size_t)vec_len,            1);
+        uint8_t  *bias_buf = (uint8_t  *)calloc((size_t)num_lanes,          1);
+        uint16_t *psum_buf = (uint16_t *)calloc((size_t)num_lanes,          sizeof(uint16_t));
+        int      *sexp_buf = (int      *)malloc((size_t)num_lanes           * sizeof(int));
+        uint16_t *lane_out = (uint16_t *)malloc((size_t)num_lanes           * sizeof(uint16_t));
+        uint16_t *psum_all = (uint16_t *)calloc((size_t)(batch * num_lanes), sizeof(uint16_t));
+        assert(act_buf && bias_buf && psum_buf && sexp_buf && lane_out && psum_all);
 
-        /* Create a fresh model for this output tile — mirrors Python's
-         * "dut = InnerProductTreesModel(self.p)" inside the out_base loop */
+        for (int li = 0; li < num_lanes; li++)
+            sexp_buf[li] = scale_exp;
+
+        /* Create a fresh model for this output tile */
         IPTModel *dut = ipt_model_init(p);
 
         /* ------------------------------------------------------------------
@@ -212,14 +212,14 @@ static inline void ipt_linear_call(
             memcpy(out_row, psum_row,
                    (size_t)lane_count * sizeof(uint16_t));
         }
-    } /* out_base */
 
-    free(psum_all);
-    free(act_buf);
-    free(bias_buf);
-    free(psum_buf);
-    free(sexp_buf);
-    free(lane_out);
+        free(psum_all);
+        free(act_buf);
+        free(bias_buf);
+        free(psum_buf);
+        free(sexp_buf);
+        free(lane_out);
+    } /* tile_idx */
 }
 
 

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import logging
 import math
 import os
 import shutil
@@ -59,6 +60,8 @@ import numpy as np
 import torch
 
 from pi0_inout_c.ipt_mxu_model.fp_formats import OutputFmtSel
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Vectorized torch fallback
@@ -327,50 +330,37 @@ void shim_ipt_linear_call(
 # Module-level singleton state
 # ---------------------------------------------------------------------------
 
-_lib: Optional[ctypes.CDLL] = None
-_build_dir: Optional[str] = None
-_lib_shim_hash: Optional[str] = None
-
-
-def _shim_hash() -> str:
-    import hashlib
-
-    return hashlib.md5(_SHIM_C.encode()).hexdigest()
+# dict[int_width_extra -> ctypes.CDLL]
+_libs: dict[int, ctypes.CDLL] = {}
+# dict[int_width_extra -> build_dir_path]
+_build_dirs: dict[int, str] = {}
 
 
 def _cleanup() -> None:
-    global _lib, _build_dir, _lib_shim_hash
-    _lib = None
-    _lib_shim_hash = None
-    if _build_dir and os.path.isdir(_build_dir):
-        shutil.rmtree(_build_dir, ignore_errors=True)
-    _build_dir = None
+    global _libs, _build_dirs
+    _libs.clear()
+    for d in _build_dirs.values():
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    _build_dirs.clear()
 
 
 atexit.register(_cleanup)
 
 
-def _get_lib() -> ctypes.CDLL:
-    """Return the cached ctypes handle, compiling on first call.
-    Recompiles automatically if _SHIM_C has changed since the last build.
-    """
-    global _lib, _build_dir, _lib_shim_hash
-
-    current_hash = _shim_hash()
-    if _lib is not None and _lib_shim_hash == current_hash:
-        return _lib
-
-    if _lib is not None:
-        _cleanup()
+def _get_lib(int_width_extra: int = 15) -> ctypes.CDLL:
+    """Return the cached ctypes handle for the given int_width_extra, compiling on first call."""
+    if int_width_extra in _libs:
+        return _libs[int_width_extra]
 
     header_dir = os.environ.get(
         "IPT_HEADER_DIR",
         os.path.dirname(os.path.abspath(__file__)),
     )
 
-    _build_dir = tempfile.mkdtemp(prefix="ipt_linear_c_")
-    shim_c = os.path.join(_build_dir, "ipt_linear_shim.c")
-    shim_so = os.path.join(_build_dir, "libipt_linear.so")
+    build_dir = tempfile.mkdtemp(prefix=f"ipt_linear_c_extra{int_width_extra}_")
+    shim_c = os.path.join(build_dir, "ipt_linear_shim.c")
+    shim_so = os.path.join(build_dir, "libipt_linear.so")
 
     with open(shim_c, "w") as fh:
         fh.write(_SHIM_C)
@@ -381,20 +371,24 @@ def _get_lib() -> ctypes.CDLL:
         "-march=native",
         "-Wall",
         "-Wno-unused-function",
+        "-fopenmp",
         "-shared",
         "-fPIC",
         f"-I{header_dir}",
+        f"-DIPT_INT_WIDTH_EXTRA={int_width_extra}",
         "-o",
         shim_so,
         shim_c,
         "-lm",
+        "-lgomp",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        _cleanup()
+        shutil.rmtree(build_dir, ignore_errors=True)
         raise RuntimeError(
             "ipt_rtl_linear_c: failed to compile C shim.\n"
             f"  IPT_HEADER_DIR = {header_dir!r}\n"
+            f"  IPT_INT_WIDTH_EXTRA = {int_width_extra}\n"
             f"  Command: {' '.join(cmd)}\n"
             f"  stderr:\n{result.stderr}"
         )
@@ -435,9 +429,9 @@ def _get_lib() -> ctypes.CDLL:
     ]
 
     lib.shim_init()
-    _lib = lib
-    _lib_shim_hash = current_hash
-    return _lib
+    _libs[int_width_extra] = lib
+    _build_dirs[int_width_extra] = build_dir
+    return lib
 
 
 # ---------------------------------------------------------------------------
@@ -530,18 +524,26 @@ class CIPTLinearRTLFunction:
         num_lanes: int = 16,
         pipeline_depth: int = 1,
         out_fmt_sel: OutputFmtSel = OutputFmtSel.OutBF16,
+        int_width_extra: int = 15,
+        layer_name: str = "",
+        component: str = "",
     ) -> None:
         self.vec_len = vec_len
         self.num_lanes = num_lanes
         self.pipeline_depth = pipeline_depth
         self.out_fmt_sel = out_fmt_sel
+        self.int_width_extra = int_width_extra
+        # Shorten to last 4 dotted parts for compact log lines
+        parts = layer_name.split(".")
+        self.layer_tag = ".".join(parts[-4:]) if len(parts) > 4 else layer_name
+        self.component = component
 
         self._w_cache_key: Optional[tuple] = None
         self._b_cache_key: Optional[tuple] = None
         self._w_np: Optional[np.ndarray] = None
         self._b_np: Optional[np.ndarray] = None
 
-        _get_lib()
+        _get_lib(int_width_extra=int_width_extra)
 
     def _prepare_weights(
         self,
@@ -575,9 +577,12 @@ class CIPTLinearRTLFunction:
         in_features: int,
         out_features: int,
         scale_exp: int,
-    ) -> torch.Tensor:
-        lib = _get_lib()
+    ) -> tuple[torch.Tensor, dict]:
+        import time
 
+        lib = _get_lib(int_width_extra=self.int_width_extra)
+
+        t0 = time.perf_counter()
         x_ptr = x_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         w_ptr = w_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         b_ptr = (
@@ -588,7 +593,9 @@ class CIPTLinearRTLFunction:
 
         out_np = np.empty(batch * out_features, dtype=np.uint16)
         out_ptr = out_np.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16))
+        t_setup = time.perf_counter() - t0
 
+        t1 = time.perf_counter()
         lib.shim_ipt_linear_call(
             ctypes.c_int(self.num_lanes),
             ctypes.c_int(self.vec_len),
@@ -604,19 +611,25 @@ class CIPTLinearRTLFunction:
             out_ptr,
         )
 
+        t_rtl = time.perf_counter() - t1
+
+        t2 = time.perf_counter()
         if self.out_fmt_sel == OutputFmtSel.OutBF16:
             # BF16 output: reinterpret uint16 bits as float32 via a torch view.
             # This is a zero-copy cast -- no C decode needed.
             u32 = torch.from_numpy(out_np.astype(np.int32)).reshape(batch, out_features)
             u32 = (u32 & 0xFFFF) << 16
-            return u32.view(torch.float32)
+            result = u32.view(torch.float32)
         else:
             # E4M3 output: low byte of each uint16 is an E4M3 byte.
             # Decode via the C LUT -- faster than the torch gather path.
             e4m3_np = (out_np & 0xFF).astype(np.uint8)
-            return torch.from_numpy(
+            result = torch.from_numpy(
                 e4m3_bytes_to_float_c(e4m3_np).reshape(batch, out_features)
             )
+        t_decode = time.perf_counter() - t2
+
+        return result, {"setup": t_setup, "rtl": t_rtl, "decode": t_decode}
 
     def __call__(
         self,
@@ -625,15 +638,41 @@ class CIPTLinearRTLFunction:
         b_q: Optional[torch.Tensor] = None,
         scale_exp: int = 0,
     ) -> torch.Tensor:
+        import time
+
         original_shape = x_q.shape[:-1]
         in_features = x_q.shape[-1]
         out_features = w_q.shape[0]
+        batch = x_q.reshape(-1, in_features).shape[0]
+        num_k_tiles = (in_features + self.vec_len - 1) // self.vec_len
+        tag = f"[{self.component}] {self.layer_tag}" if self.component else self.layer_tag
 
+        log.info(
+            "__call__: %s  w(%d,%d)  batch=%d  in=%d  out=%d  k_tiles=%d  scale_exp=%d",
+            tag, out_features, in_features,
+            batch, in_features, out_features, num_k_tiles, scale_exp,
+        )
+
+        t0 = time.perf_counter()
         x2 = x_q.reshape(-1, in_features).float()
         batch = x2.shape[0]
 
+        t_x_e4m3 = time.perf_counter()
         x_np = float_to_e4m3_bytes_c(_tensor_to_f32_numpy(x2))
-        w_np, b_np = self._prepare_weights(w_q, b_q)
+        t_x_e4m3 = time.perf_counter() - t_x_e4m3
 
-        y = self._call_c(x_np, w_np, b_np, batch, in_features, out_features, scale_exp)
-        return y.reshape(*original_shape, out_features)
+        t_w_e4m3 = time.perf_counter()
+        w_np, b_np = self._prepare_weights(w_q, b_q)
+        t_w_e4m3 = time.perf_counter() - t_w_e4m3
+
+        y, subtimes = self._call_c(x_np, w_np, b_np, batch, in_features, out_features, scale_exp)
+        elapsed = time.perf_counter() - t0
+
+        result = y.reshape(*original_shape, out_features)
+        log.info(
+            "__call__: done  %s  elapsed=%.3fs  w(%d,%d)  batch=%d  fmt=%s  "
+            "[x_e4m3=%.3fs  w_e4m3=%.3fs  rtl=%.3fs]",
+            tag, elapsed, out_features, in_features, batch, self.out_fmt_sel.name,
+            t_x_e4m3, t_w_e4m3, subtimes["rtl"],
+        )
+        return result

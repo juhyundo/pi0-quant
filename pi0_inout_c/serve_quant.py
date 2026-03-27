@@ -13,7 +13,7 @@ How it works
 3. Instantiates PI0Pytorch from a hardcoded config dict for the known
    training configs (no JAX config system required).
 4. Loads weights from a local safetensors checkpoint if available.
-5. Patches every nn.Linear with QuantLinear (input_fmt / output_fmt).
+5. Patches every nn.Linear with QuantLinearC (input_fmt / output_fmt).
 6. Serves via the openpi WebSocket protocol (msgpack + websockets).
 7. On SIGTERM/SIGINT, writes per-layer RMSE stats to --stats-output.
 
@@ -66,7 +66,7 @@ for _p in [str(_PI0_INOUT.parent), str(_CLIENT_SRC), str(_OPENPI_SRC)]:
         sys.path.insert(0, _p)
 
 # ── Inject JAX stubs BEFORE any openpi import ────────────────────────────────
-from pi0_inout._jax_stubs import inject as _inject_jax_stubs   # noqa: E402
+from pi0_inout_c._jax_stubs import inject as _inject_jax_stubs   # noqa: E402
 _inject_jax_stubs()
 
 # ── Now it is safe to import the pytorch model ────────────────────────────────
@@ -74,15 +74,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# ── pi0_inout imports (quantization layer) ────────────────────────────────────
-from pi0_inout.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS, set_fp8_mode
-from pi0_inout.model_patcher import (
+# ── pi0_inout_c imports (C-backed quantization layer) ─────────────────────────
+from pi0_inout_c.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS, set_fp8_mode
+from pi0_inout_c.model_patcher import (
     patch_model, list_linear_layers,
     QuantGroup, ALL_GROUPS,
     patch_attn_sdpa, unpatch_attn_sdpa,
 )
-from pi0_inout.quant_linear import QuantLinear
-from pi0_inout.stats_tracker import StatsTracker
+from pi0_inout_c.quant_linear_c import QuantLinearC
+from pi0_inout_c.stats_tracker import StatsTracker
+from pi0_inout_c.rel_noise import RelNoiseConfig
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ def load_pi0_pytorch(
     )
 
     model = PI0Pytorch(cfg)
-    # torch.compile is applied in __init__; QuantLinear has Python-level conditional
+    # torch.compile is applied in __init__; QuantLinearC has Python-level conditional
     # logic that Dynamo cannot trace. Unwrap back to the raw Python method.
     model.sample_actions = model.sample_actions.__wrapped__
     model = model.to(device)
@@ -292,7 +293,7 @@ def print_quant_diagnostics(
     print("QUANTIZATION DIAGNOSTICS")
     print("=" * 80)
 
-    # 1. Layer inventory: count QuantLinear vs plain nn.Linear
+    # 1. Layer inventory: count QuantLinearC vs plain nn.Linear
     n_quant = 0
     n_plain = 0
     total_params = 0
@@ -300,7 +301,7 @@ def print_quant_diagnostics(
     sample_layer = None
 
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             n_quant += 1
             n_params = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
             quant_params += n_params
@@ -313,18 +314,18 @@ def print_quant_diagnostics(
             total_params += n_params
 
     print(f"\n[1] Layer counts:")
-    print(f"    QuantLinear layers: {n_quant}")
+    print(f"    QuantLinearC layers: {n_quant}")
     print(f"    Plain nn.Linear:   {n_plain}")
     print(f"    Total parameters:  {total_params:,}")
     print(f"    Quantized params:  {quant_params:,}")
 
-    # 2. Print a few representative QuantLinear layers
-    print(f"\n[2] Sample QuantLinear layers (first 5):")
+    # 2. Print a few representative QuantLinearC layers
+    print(f"\n[2] Sample QuantLinearC layers (first 5):")
     print(f"    {'Name':<60s}  {'Weight dtype':<12s}  input_fmt    output_fmt")
     print("    " + "-" * 110)
     count = 0
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             print(f"    {name:<60s}  {str(module.weight.dtype):<12s}  "
                   f"{module.input_fmt.value:<12s} {module.output_fmt.value}")
             count += 1
@@ -344,7 +345,7 @@ def print_quant_diagnostics(
     # Hypothetical memory if weights were ACTUALLY stored in input_fmt
     hypothetical_bytes = 0
     for name, module in model.named_modules():
-        if isinstance(module, QuantLinear):
+        if isinstance(module, QuantLinearC):
             n = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
             hypothetical_bytes += n * (input_bits // 8)
         elif type(module) is nn.Linear:
@@ -353,7 +354,7 @@ def print_quant_diagnostics(
     # Add non-linear params at their actual size
     linear_param_ids = set()
     for name, module in model.named_modules():
-        if isinstance(module, (QuantLinear, nn.Linear)):
+        if isinstance(module, (QuantLinearC, nn.Linear)):
             for p in module.parameters():
                 linear_param_ids.add(id(p))
     for p in model.parameters():
@@ -569,8 +570,15 @@ class Pi0PyTorchPolicy:
             token_loss_mask=token_loss_mask,
         )
 
+        # Optional fixed noise for reproducible comparisons (shape: (H, 32) or (1, H, 32)).
+        noise = None
+        if "pi0_noise" in obs:
+            noise = torch.from_numpy(np.asarray(obs["pi0_noise"], dtype=np.float32).copy()).to(dev)
+            if noise.ndim == 2:
+                noise = noise.unsqueeze(0)  # (H, 32) → (1, H, 32)
+
         with torch.no_grad():
-            actions = self.model.sample_actions(str(dev), obs_ns, num_steps=10)
+            actions = self.model.sample_actions(str(dev), obs_ns, noise=noise, num_steps=10)
         # actions: [1, action_horizon, 32]  (normalized action space)
         actions = actions.squeeze(0).cpu().numpy()  # (horizon, 32)
 
@@ -638,6 +646,11 @@ def main() -> None:
 
     active_groups = {QuantGroup(g) for g in args.quantize_components}
 
+    noise_cfg = None
+    if args.rel_err and args.rel_err > 0.0:
+        noise_cfg = RelNoiseConfig(rel_err=args.rel_err)
+        logger.info(f"Relative-error noise: rel_err={args.rel_err:.4e}")
+
     tracker = StatsTracker()
     patch_model(
         model=model,
@@ -645,7 +658,9 @@ def main() -> None:
         output_fmt=output_fmt,
         tracker=tracker,
         active_groups=active_groups,
+        noise_cfg=noise_cfg,
         verbose=False,
+        int_width_extra=args.int_width_extra,
     )
     attn_handles = patch_attn_sdpa(
         model=model,
@@ -783,6 +798,12 @@ def parse_args() -> argparse.Namespace:
                    help="Write JSON RMSE stats here on exit")
     p.add_argument("--list-layers", action="store_true",
                    help="Print linear layer inventory and exit")
+    p.add_argument("--int-width-extra", type=int, default=15,
+                   help="Addend in IPT_intWidth = E4M3ProdSigWidth + anchorHeadroom + INT_WIDTH_EXTRA (default 15)")
+    p.add_argument("--rel-err", type=float, default=0.0,
+                   help="Inject +/- rel_err * |y| noise into each Linear matmul output (0 disables)")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Seed for torch RNG (makes rel-err noise deterministic)")
     return p.parse_args()
 
 

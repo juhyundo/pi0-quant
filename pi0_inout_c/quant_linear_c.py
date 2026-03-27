@@ -47,11 +47,13 @@ from .quant_types import QuantFormat, quant
 from .stats_tracker import StatsTracker, Component
 from .ipt_mxu_model.ipt_rtl_linear_c import CIPTLinearRTLFunction
 from .ipt_mxu_model.fp_formats import OutputFmtSel
+from .rel_noise import RelNoiseConfig, inject_rel_noise
 
 
 _SUPPORTED_E4M3_NAMES = {
     "e4m3",
     "fp8_e4m3",
+    "float8_e4m3",
     "ocp_e4m3",
 }
 
@@ -88,11 +90,13 @@ class QuantLinearC(nn.Module):
         component: Component,
         layer_name: str,
         tracker: Optional[StatsTracker] = None,
+        noise_cfg: Optional[RelNoiseConfig] = None,
         *,
         vec_len: int = 32,
         num_lanes: int = 16,
         pipeline_depth: int = 1,
         scale_exp: int = 0,
+        int_width_extra: int = 15,
     ) -> None:
         super().__init__()
         self.weight = linear.weight
@@ -103,6 +107,8 @@ class QuantLinearC(nn.Module):
         self.component = component
         self.layer_name = layer_name
         self.tracker = tracker
+        self.noise_cfg = noise_cfg
+        self.int_width_extra = int_width_extra
 
         self.in_features = linear.in_features
         self.out_features = linear.out_features
@@ -123,6 +129,9 @@ class QuantLinearC(nn.Module):
             num_lanes=num_lanes,
             pipeline_depth=pipeline_depth,
             out_fmt_sel=self.out_fmt_sel,
+            int_width_extra=int_width_extra,
+            layer_name=layer_name,
+            component=component.value,
         )
 
     @staticmethod
@@ -173,7 +182,11 @@ class QuantLinearC(nn.Module):
             w_q,
             b_q,
             scale_exp=self.scale_exp,
-        )
+        ).to(x_f32.device)
+
+        # ── Optional relative-error noise injection ──────────────────────────
+        if self.noise_cfg is not None and self.noise_cfg.enabled():
+            y_accum = inject_rel_noise(y_accum, rel_err=self.noise_cfg.rel_err)
 
         # ── Write result to output memory in output_fmt ──────────────────────
         y_out = quant(y_accum, self.output_fmt)
